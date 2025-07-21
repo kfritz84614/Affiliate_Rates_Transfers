@@ -46,11 +46,11 @@ if uploaded_file:
 
     if st.button("Ask ChatGPT"):
         # Use dataset summaries instead of a few sample rows
-        summary_stats = df.describe(include='number').to_string()
-        column_list = df.columns.tolist()
+        summary_stats = df.describe(include='number').astype(str).to_string()
+        column_list = [str(col) for col in df.columns.tolist()]
 
         if affiliate_col and estimated_col and final_col:
-            aff_summary = df.groupby(affiliate_col)[[estimated_col, final_col]].agg(["count", "sum", "mean"]).to_string()
+            aff_summary = str(df.groupby(affiliate_col)[[estimated_col, final_col]].agg(["count", "sum", "mean"]))
         else:
             aff_summary = "Affiliate/cost column(s) missing."
 
