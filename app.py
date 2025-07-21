@@ -2,34 +2,63 @@ import streamlit as st
 import openai
 import pandas as pd
 import io
+import matplotlib.pyplot as plt
 
-# Set OpenAI API key
+# Set your OpenAI API key securely from Streamlit secrets
 openai.api_key = st.secrets["OPENAI_API_KEY"]
 
-# UI: Upload CSV
-st.title("Affiliate Overrun Analyzer")
-uploaded_file = st.file_uploader("Upload a CSV file", type="csv")
+# Page config
+st.set_page_config(page_title="Affiliate Rate Auditor", layout="wide")
+st.title("📊 Affiliate Rate Audit — Ask ChatGPT Anything")
 
-if uploaded_file is not None:
-    # Read CSV into DataFrame
+# Upload CSV
+uploaded_file = st.file_uploader("Upload your CSV file", type="csv")
+
+if uploaded_file:
     df = pd.read_csv(uploaded_file)
-    st.write("### Preview of Data")
-    st.dataframe(df.head())
+    st.success("CSV loaded successfully.")
+    st.write("### Preview of Uploaded Data")
+    st.dataframe(df.head(20), use_container_width=True)
 
-    # Ask question
-    question = st.text_area("Ask a question about your data:")
+    # Optional: basic column summary
+    with st.expander("📌 Column Info"):
+        st.write(df.dtypes)
 
-    if st.button("Ask") and question:
-        # Trim data sample for prompt (e.g., first 10 rows only)
-        sample_csv = df.head(10).to_csv(index=False)
+    question = st.text_area("What would you like to ask about this data?", placeholder="E.g. Which affiliates overcharge the most?")
 
-        prompt = f"""You're a data analyst. Here's a table of data:\n\n{sample_csv}\n\nAnswer this question: {question}"""
+    if st.button("Ask ChatGPT"):
+        sample_data = df.head(10).to_csv(index=False)
 
-        response = openai.ChatCompletion.create(
-            model="gpt-4",
-            messages=[{"role": "user", "content": prompt}],
-            temperature=0.3
-        )
+        prompt = f"""
+You are a data analyst auditing affiliate pricing. A CSV was uploaded with the following sample rows:
 
-        st.write("### Answer:")
-        st.write(response.choices[0].message.content)
+{sample_data}
+
+Answer the following question based on the full dataset (assume the rest follows the same structure):
+{question}
+"""
+
+        with st.spinner("Thinking..."):
+            response = openai.ChatCompletion.create(
+                model="gpt-4",
+                messages=[{"role": "user", "content": prompt}],
+                temperature=0.3
+            )
+            answer = response.choices[0].message.content
+
+        st.write("### 💡 Answer from ChatGPT:")
+        st.markdown(answer)
+
+    # Optional: automatic chart if the question implies it
+    if any(kw in question.lower() for kw in ["chart", "graph", "plot"]):
+        st.subheader("📈 Chart Based on Your Data")
+        numeric_cols = df.select_dtypes(include='number').columns.tolist()
+
+        if len(numeric_cols) >= 2:
+            x_col = st.selectbox("X-Axis", options=numeric_cols, index=0)
+            y_col = st.selectbox("Y-Axis", options=numeric_cols, index=1)
+            fig, ax = plt.subplots()
+            df.plot(kind="scatter", x=x_col, y=y_col, ax=ax)
+            st.pyplot(fig)
+        else:
+            st.warning("Not enough numeric columns to generate a plot.")
