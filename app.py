@@ -23,33 +23,7 @@ if uploaded_file:
     with st.expander("Column Info"):
         st.write(df.dtypes)
 
-    # Ask natural language question
-    question = st.text_area("What would you like to ask about this data?", placeholder="E.g. Which affiliates overcharge the most?")
-
-    if st.button("Ask ChatGPT"):
-        sample_data = df.head(10).to_csv(index=False)
-
-        prompt = f"""
-You are a data analyst auditing affiliate pricing. A CSV was uploaded with the following sample rows:
-
-{sample_data}
-
-Answer the following question based on the full dataset (assume the rest follows the same structure):
-{question}
-"""
-
-        with st.spinner("Thinking..."):
-            response = client.chat.completions.create(
-                model="gpt-4o",
-                messages=[{"role": "user", "content": prompt}],
-                temperature=0.3
-            )
-            answer = response.choices[0].message.content
-
-        st.write("### Answer from ChatGPT:")
-        st.markdown(answer)
-
-    # Custom Affiliate Cost Comparison Chart
+    # Always display Affiliate Cost Comparison Chart if relevant columns exist
     if "Affiliate ID" in df.columns and "Estimated Cost" in df.columns and "Final Cost" in df.columns:
         st.subheader("Affiliate Cost Comparison")
 
@@ -62,7 +36,39 @@ Answer the following question based on the full dataset (assume the rest follows
 
         st.plotly_chart(fig, use_container_width=True)
 
-    # Optional: automatic chart if the question implies it
+    # Ask natural language question
+    question = st.text_area("What would you like to ask about this data?", placeholder="E.g. Which affiliates overcharge the most?")
+
+    if st.button("Ask ChatGPT"):
+        # Use dataset summaries instead of a few sample rows
+        summary_stats = df.describe(include='all').to_string()
+        aff_summary = df.groupby("Affiliate ID")[["Estimated Cost", "Final Cost"]].agg(["count", "sum", "mean"]).to_string()
+
+        prompt = f"""
+You are a data analyst auditing affiliate pricing. The full dataset has been summarized below:
+
+Summary Statistics:
+{summary_stats}
+
+Affiliate Cost Breakdown:
+{aff_summary}
+
+Based on the above, answer this question:
+{question}
+"""
+
+        with st.spinner("Thinking..."):
+            response = client.chat.completions.create(
+                model="gpt-4",
+                messages=[{"role": "user", "content": prompt}],
+                temperature=0.3
+            )
+            answer = response.choices[0].message.content
+
+        st.write("### Answer from ChatGPT:")
+        st.markdown(answer)
+
+    # Optional: user-generated custom chart if implied by question
     if any(kw in question.lower() for kw in ["chart", "graph", "plot"]):
         st.subheader("Chart Based on Your Data")
 
