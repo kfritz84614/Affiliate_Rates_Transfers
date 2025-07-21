@@ -46,7 +46,8 @@ if uploaded_file:
 
     if st.button("Ask ChatGPT"):
         # Use dataset summaries instead of a few sample rows
-        summary_stats = df.describe(include='all').to_string()
+        summary_stats = df.describe(include='number').to_string()
+        column_list = df.columns.tolist()
 
         if affiliate_col and estimated_col and final_col:
             aff_summary = df.groupby(affiliate_col)[[estimated_col, final_col]].agg(["count", "sum", "mean"]).to_string()
@@ -54,9 +55,10 @@ if uploaded_file:
             aff_summary = "Affiliate/cost column(s) missing."
 
         prompt = f"""
-You are a data analyst auditing affiliate pricing. The full dataset has been summarized below:
+You are a data analyst auditing affiliate pricing. The full dataset includes the following columns:
+{column_list}
 
-Summary Statistics:
+Summary Statistics of Numeric Fields:
 {summary_stats}
 
 Affiliate Cost Breakdown:
