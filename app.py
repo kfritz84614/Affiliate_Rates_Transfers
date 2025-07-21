@@ -32,7 +32,7 @@ if uploaded_file:
     if affiliate_col and estimated_col and final_col:
         st.subheader("Affiliate Cost Comparison")
 
-        summary_df = df.groupby(affiliate_col)[[estimated_col, final_col]].sum().reset_index()
+        summary_df = df.groupby(affiliate_col)[[estimated_col, final_col]].sum(numeric_only=True).reset_index()
         summary_df = summary_df.melt(id_vars=affiliate_col, value_vars=[estimated_col, final_col], 
                                      var_name="Cost Type", value_name="Total Cost")
 
@@ -50,7 +50,20 @@ if uploaded_file:
         column_list = [str(col) for col in df.columns.tolist()]
 
         if affiliate_col and estimated_col and final_col:
-            aff_summary = str(df.groupby(affiliate_col)[[estimated_col, final_col]].agg(["count", "sum", "mean"]))
+            try:
+                numeric_estimated = pd.to_numeric(df[estimated_col], errors="coerce")
+                numeric_final = pd.to_numeric(df[final_col], errors="coerce")
+
+                aff_summary_df = pd.DataFrame({
+                    affiliate_col: df[affiliate_col],
+                    "Estimated": numeric_estimated,
+                    "Final": numeric_final
+                }).dropna()
+
+                aff_summary = aff_summary_df.groupby(affiliate_col)[["Estimated", "Final"]].agg(["count", "sum", "mean"]).astype(str)
+                aff_summary = aff_summary.to_string()
+            except Exception as e:
+                aff_summary = f"Error generating affiliate summary: {e}"
         else:
             aff_summary = "Affiliate/cost column(s) missing."
 
