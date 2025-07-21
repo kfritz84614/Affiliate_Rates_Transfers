@@ -8,7 +8,7 @@ client = OpenAI(api_key=st.secrets["OPENAI_API_KEY"])
 
 # Page setup
 st.set_page_config(page_title="Affiliate Rate Auditor", layout="wide")
-st.title("\ud83d\udcca Affiliate Rate Audit \u2014 Ask ChatGPT Anything")
+st.title("Affiliate Rate Audit - Ask ChatGPT Anything")
 
 # Upload CSV
 uploaded_file = st.file_uploader("Upload your CSV file", type="csv")
@@ -20,7 +20,7 @@ if uploaded_file:
     st.dataframe(df.head(20), use_container_width=True)
 
     # Optional: basic column summary
-    with st.expander("\ud83d\udccc Column Info"):
+    with st.expander("Column Info"):
         st.write(df.dtypes)
 
     # Ask natural language question
@@ -46,12 +46,12 @@ Answer the following question based on the full dataset (assume the rest follows
             )
             answer = response.choices[0].message.content
 
-        st.write("### \ud83d\udca1 Answer from ChatGPT:")
+        st.write("### Answer from ChatGPT:")
         st.markdown(answer)
 
     # Custom Affiliate Cost Comparison Chart
     if "Affiliate ID" in df.columns and "Estimated Cost" in df.columns and "Final Cost" in df.columns:
-        st.subheader("\ud83d\udcc8 Affiliate Cost Comparison")
+        st.subheader("Affiliate Cost Comparison")
 
         summary_df = df.groupby("Affiliate ID")[["Estimated Cost", "Final Cost"]].sum().reset_index()
         summary_df = summary_df.melt(id_vars="Affiliate ID", value_vars=["Estimated Cost", "Final Cost"], 
@@ -64,7 +64,7 @@ Answer the following question based on the full dataset (assume the rest follows
 
     # Optional: automatic chart if the question implies it
     if any(kw in question.lower() for kw in ["chart", "graph", "plot"]):
-        st.subheader("\ud83d\udcc8 Chart Based on Your Data")
+        st.subheader("Chart Based on Your Data")
 
         numeric_cols = df.select_dtypes(include="number").columns.tolist()
         if len(numeric_cols) >= 2:
