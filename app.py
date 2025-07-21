@@ -1,13 +1,12 @@
 import streamlit as st
 import openai
 import pandas as pd
-import io
-import matplotlib.pyplot as plt
+import plotly.express as px
 
-# Set your OpenAI API key securely from Streamlit secrets
+# Set OpenAI API key securely
 openai.api_key = st.secrets["OPENAI_API_KEY"]
 
-# Page config
+# Page setup
 st.set_page_config(page_title="Affiliate Rate Auditor", layout="wide")
 st.title("📊 Affiliate Rate Audit — Ask ChatGPT Anything")
 
@@ -24,6 +23,7 @@ if uploaded_file:
     with st.expander("📌 Column Info"):
         st.write(df.dtypes)
 
+    # Ask natural language question
     question = st.text_area("What would you like to ask about this data?", placeholder="E.g. Which affiliates overcharge the most?")
 
     if st.button("Ask ChatGPT"):
@@ -52,13 +52,24 @@ Answer the following question based on the full dataset (assume the rest follows
     # Optional: automatic chart if the question implies it
     if any(kw in question.lower() for kw in ["chart", "graph", "plot"]):
         st.subheader("📈 Chart Based on Your Data")
-        numeric_cols = df.select_dtypes(include='number').columns.tolist()
 
+        numeric_cols = df.select_dtypes(include="number").columns.tolist()
         if len(numeric_cols) >= 2:
-            x_col = st.selectbox("X-Axis", options=numeric_cols, index=0)
-            y_col = st.selectbox("Y-Axis", options=numeric_cols, index=1)
-            fig, ax = plt.subplots()
-            df.plot(kind="scatter", x=x_col, y=y_col, ax=ax)
-            st.pyplot(fig)
+            col1, col2 = st.columns(2)
+            with col1:
+                x_axis = st.selectbox("Select X-axis", numeric_cols, index=0)
+            with col2:
+                y_axis = st.selectbox("Select Y-axis", numeric_cols, index=1)
+
+            chart_type = st.radio("Chart Type", ["Scatter", "Bar", "Line"])
+
+            if chart_type == "Scatter":
+                fig = px.scatter(df, x=x_axis, y=y_axis, title=f"{y_axis} vs {x_axis}")
+            elif chart_type == "Bar":
+                fig = px.bar(df, x=x_axis, y=y_axis, title=f"{y_axis} by {x_axis}")
+            elif chart_type == "Line":
+                fig = px.line(df.sort_values(by=x_axis), x=x_axis, y=y_axis, title=f"{y_axis} over {x_axis}")
+
+            st.plotly_chart(fig, use_container_width=True)
         else:
-            st.warning("Not enough numeric columns to generate a plot.")
+            st.warning("Not enough numeric columns to generate a chart.")
