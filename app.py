@@ -23,15 +23,20 @@ if uploaded_file:
     with st.expander("Column Info"):
         st.write(df.dtypes)
 
+    # Flexible column name detection
+    affiliate_col = next((col for col in df.columns if "affiliate" in col.lower()), None)
+    estimated_col = next((col for col in df.columns if "estimate" in col.lower()), None)
+    final_col = next((col for col in df.columns if "final" in col.lower() or "actual" in col.lower()), None)
+
     # Always display Affiliate Cost Comparison Chart if relevant columns exist
-    if "Affiliate ID" in df.columns and "Estimated Cost" in df.columns and "Final Cost" in df.columns:
+    if affiliate_col and estimated_col and final_col:
         st.subheader("Affiliate Cost Comparison")
 
-        summary_df = df.groupby("Affiliate ID")[["Estimated Cost", "Final Cost"]].sum().reset_index()
-        summary_df = summary_df.melt(id_vars="Affiliate ID", value_vars=["Estimated Cost", "Final Cost"], 
+        summary_df = df.groupby(affiliate_col)[[estimated_col, final_col]].sum().reset_index()
+        summary_df = summary_df.melt(id_vars=affiliate_col, value_vars=[estimated_col, final_col], 
                                      var_name="Cost Type", value_name="Total Cost")
 
-        fig = px.bar(summary_df, x="Affiliate ID", y="Total Cost", color="Cost Type", barmode="overlay",
+        fig = px.bar(summary_df, x=affiliate_col, y="Total Cost", color="Cost Type", barmode="overlay",
                      title="Total Final vs Estimated Cost by Affiliate")
 
         st.plotly_chart(fig, use_container_width=True)
@@ -42,7 +47,11 @@ if uploaded_file:
     if st.button("Ask ChatGPT"):
         # Use dataset summaries instead of a few sample rows
         summary_stats = df.describe(include='all').to_string()
-        aff_summary = df.groupby("Affiliate ID")[["Estimated Cost", "Final Cost"]].agg(["count", "sum", "mean"]).to_string()
+
+        if affiliate_col and estimated_col and final_col:
+            aff_summary = df.groupby(affiliate_col)[[estimated_col, final_col]].agg(["count", "sum", "mean"]).to_string()
+        else:
+            aff_summary = "Affiliate/cost column(s) missing."
 
         prompt = f"""
 You are a data analyst auditing affiliate pricing. The full dataset has been summarized below:
