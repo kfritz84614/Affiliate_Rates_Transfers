@@ -1,10 +1,10 @@
 import streamlit as st
-import openai
 import pandas as pd
 import plotly.express as px
+from openai import OpenAI
 
 # Set OpenAI API key securely
-openai.api_key = st.secrets["OPENAI_API_KEY"]
+client = OpenAI(api_key=st.secrets["OPENAI_API_KEY"])
 
 # Page setup
 st.set_page_config(page_title="Affiliate Rate Auditor", layout="wide")
@@ -39,7 +39,7 @@ Answer the following question based on the full dataset (assume the rest follows
 """
 
         with st.spinner("Thinking..."):
-            response = openai.ChatCompletion.create(
+            response = client.chat.completions.create(
                 model="gpt-4",
                 messages=[{"role": "user", "content": prompt}],
                 temperature=0.3
