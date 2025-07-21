@@ -40,7 +40,7 @@ Answer the following question based on the full dataset (assume the rest follows
 
         with st.spinner("Thinking..."):
             response = client.chat.completions.create(
-                model="gpt-4",
+                model="gpt-4o",
                 messages=[{"role": "user", "content": prompt}],
                 temperature=0.3
             )
