@@ -1,118 +1,115 @@
-import streamlit as st
+# app.py — CSV Insight Assistant
+# -----------------------------------------------
+# • Upload a CSV and instantly explore it
+# • One-click profiling (ydata-profiling)
+# • Quick trend chart wizard (Plotly)
+# • Natural-language Q&A powered by OpenAI
+# -----------------------------------------------
+
+import os, textwrap, io
 import pandas as pd
 import plotly.express as px
+import streamlit as st
 from openai import OpenAI
+from ydata_profiling import ProfileReport
 
-# Set OpenAI API key securely
-client = OpenAI(api_key=st.secrets["OPENAI_API_KEY"])
+# ----------  Streamlit page setup  ----------
+st.set_page_config(page_title="CSV Insight Assistant", layout="wide")
+st.title("📊 CSV Insight Assistant")
 
-# Page setup
-st.set_page_config(page_title="Affiliate Rate Auditor", layout="wide")
-st.title("Affiliate Rate Audit - Ask ChatGPT Anything")
+# ----------  OpenAI client  ----------
+OPENAI_API_KEY = (
+    st.secrets["OPENAI_API_KEY"]        # Streamlit Cloud secrets
+    if "OPENAI_API_KEY" in st.secrets   # (fallback to env for local dev)
+    else os.getenv("OPENAI_API_KEY")
+)
+if not OPENAI_API_KEY:
+    st.error("❌ No OpenAI key found in Streamlit secrets or $OPENAI_API_KEY.")
+    st.stop()
 
-# Upload CSV
-uploaded_file = st.file_uploader("Upload your CSV file", type="csv")
+openai = OpenAI(api_key=OPENAI_API_KEY)
+MODEL = "gpt-4o-mini"   # good balance of speed / context
 
-if uploaded_file:
-    df = pd.read_csv(uploaded_file)
-    st.success("CSV loaded successfully.")
-    st.write("### Preview of Uploaded Data")
-    st.dataframe(df.head(20), use_container_width=True)
+# ----------  Helpers  ----------
+@st.cache_data(show_spinner=False)
+def load_csv(buffer: io.BytesIO) -> pd.DataFrame:
+    return pd.read_csv(buffer)
 
-    # Optional: basic column summary
-    with st.expander("Column Info"):
-        st.write(df.dtypes)
+@st.cache_data(show_spinner=False)
+def profile(df: pd.DataFrame) -> ProfileReport:
+    return ProfileReport(df, title="Data Profiling Report", minimal=True)
 
-    # Flexible column name detection
-    affiliate_col = next((col for col in df.columns if "affiliate" in col.lower()), None)
-    estimated_col = next((col for col in df.columns if "estimate" in col.lower()), None)
-    final_col = next((col for col in df.columns if "final" in col.lower() or "actual" in col.lower()), None)
+def ask_llm(df: pd.DataFrame, question: str) -> str:
+    numeric_md = df.describe(include="number").to_markdown()
+    prompt = textwrap.dedent(
+        f"""
+        You are a senior data analyst.
+        The user uploaded a CSV with {len(df):,} rows.
+        Columns: {', '.join(df.columns)}.
 
-    # Always display Affiliate Cost Comparison Chart if relevant columns exist
-    if affiliate_col and estimated_col and final_col:
-        st.subheader("Affiliate Cost Comparison")
+        **Numeric summary (markdown)**:
+        {numeric_md}
 
-        summary_df = df.groupby(affiliate_col)[[estimated_col, final_col]].sum(numeric_only=True).reset_index()
-        summary_df = summary_df.melt(id_vars=affiliate_col, value_vars=[estimated_col, final_col], 
-                                     var_name="Cost Type", value_name="Total Cost")
+        Answer the question **succinctly** and suggest one or two follow-up analyses.
 
-        fig = px.bar(summary_df, x=affiliate_col, y="Total Cost", color="Cost Type", barmode="overlay",
-                     title="Total Final vs Estimated Cost by Affiliate")
+        Question: {question}
+        """
+    )
+    resp = openai.chat.completions.create(
+        model=MODEL,
+        messages=[{"role": "user", "content": prompt}],
+        temperature=0.2,
+    )
+    return resp.choices[0].message.content.strip()
 
-        st.plotly_chart(fig, use_container_width=True)
+# ----------  File upload  ----------
+file = st.file_uploader("📥  Upload a CSV file", type="csv")
+if not file:
+    st.info("Drag a CSV above to begin.")
+    st.stop()
 
-    # Ask natural language question
-    question = st.text_area("What would you like to ask about this data?", placeholder="E.g. Which affiliates overcharge the most?")
+df = load_csv(file)
+st.success(f"Loaded **{file.name}** – {len(df):,} rows × {len(df.columns)} cols")
+st.dataframe(df.head(25), use_container_width=True)
 
-    if st.button("Ask ChatGPT"):
-        # Use dataset summaries instead of a few sample rows
-        summary_stats = df.describe(include='number').astype(str).to_string()
-        column_list = [str(col) for col in df.columns.tolist()]
+# ----------  Quick EDA / profiling  ----------
+with st.expander("🔍  One-click Profiling"):
+    if st.button("Generate profiling report"):
+        with st.spinner("Running ydata-profiling… (may take a minute)"):
+            pr = profile(df)
+        st.components.v1.html(pr.to_html(), height=800, scrolling=True)
 
-        if affiliate_col and estimated_col and final_col:
-            try:
-                numeric_estimated = pd.to_numeric(df[estimated_col], errors="coerce")
-                numeric_final = pd.to_numeric(df[final_col], errors="coerce")
+# ----------  Trend chart wizard  ----------
+num_cols = df.select_dtypes("number").columns
+if len(num_cols) >= 2:
+    st.subheader("📈  Quick Trend Plot")
+    col1, col2 = st.columns(2)
+    with col1:
+        x_axis = st.selectbox("X-axis", num_cols, key="x_axis")
+    with col2:
+        y_axis = st.selectbox("Y-axis", num_cols, key="y_axis")
+    if x_axis and y_axis:
+        chart = px.line(
+            df.sort_values(by=x_axis),
+            x=x_axis,
+            y=y_axis,
+            title=f"{y_axis} over {x_axis}",
+        )
+        st.plotly_chart(chart, use_container_width=True)
 
-                aff_summary_df = pd.DataFrame({
-                    affiliate_col: df[affiliate_col],
-                    "Estimated": numeric_estimated,
-                    "Final": numeric_final
-                }).dropna()
-
-                aff_summary = aff_summary_df.groupby(affiliate_col)[["Estimated", "Final"]].agg(["count", "sum", "mean"]).astype(str)
-                aff_summary = aff_summary.to_string()
-            except Exception as e:
-                aff_summary = f"Error generating affiliate summary: {e}"
-        else:
-            aff_summary = "Affiliate/cost column(s) missing."
-
-        prompt = f"""
-You are a data analyst auditing affiliate pricing. The full dataset includes the following columns:
-{column_list}
-
-Summary Statistics of Numeric Fields:
-{summary_stats}
-
-Affiliate Cost Breakdown:
-{aff_summary}
-
-Based on the above, answer this question:
-{question}
-"""
-
-        with st.spinner("Thinking..."):
-            response = client.chat.completions.create(
-                model="gpt-4",
-                messages=[{"role": "user", "content": prompt}],
-                temperature=0.3
-            )
-            answer = response.choices[0].message.content
-
-        st.write("### Answer from ChatGPT:")
+# ----------  Ask AI  ----------
+st.subheader("🤖  Ask a question about your data")
+query = st.text_area("Type your question here…", placeholder="e.g. Which products are growing fastest?")
+if st.button("Ask"):
+    if not query.strip():
+        st.warning("Please enter a question.")
+    else:
+        with st.spinner("Thinking…"):
+            answer = ask_llm(df, query)
         st.markdown(answer)
-
-    # Optional: user-generated custom chart if implied by question
-    if any(kw in question.lower() for kw in ["chart", "graph", "plot"]):
-        st.subheader("Chart Based on Your Data")
-
-        numeric_cols = df.select_dtypes(include="number").columns.tolist()
-        if len(numeric_cols) >= 2:
-            col1, col2 = st.columns(2)
-            with col1:
-                x_axis = st.selectbox("Select X-axis", numeric_cols, index=0)
-            with col2:
-                y_axis = st.selectbox("Select Y-axis", numeric_cols, index=1)
-
-            chart_type = st.radio("Chart Type", ["Scatter", "Bar", "Line"])
-
-            if chart_type == "Scatter":
-                fig = px.scatter(df, x=x_axis, y=y_axis, title=f"{y_axis} vs {x_axis}")
-            elif chart_type == "Bar":
-                fig = px.bar(df, x=x_axis, y=y_axis, title=f"{y_axis} by {x_axis}")
-            elif chart_type == "Line":
-                fig = px.line(df.sort_values(by=x_axis), x=x_axis, y=y_axis, title=f"{y_axis} over {x_axis}")
-
-            st.plotly_chart(fig, use_container_width=True)
-        else:
-            st.warning("Not enough numeric columns to generate a chart.")
+        st.download_button(
+            "💾  Download answer (.md)",
+            data=answer.encode(),
+            file_name="analysis.md",
+            mime="text/markdown",
+        )
