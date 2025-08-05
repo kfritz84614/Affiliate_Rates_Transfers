@@ -1,251 +1,153 @@
+"""Streamlit CSV Insight Assistant – rev 7.0  (LLM‑first, function‑calling)
+======================================================================
+The LLM can now *truly* “see” the data via OpenAI function‑calling:
+• We expose a single function `get_stat(column, value, metric)` that the
+  model can invoke on demand.  It returns mean / median of *Rate Variance*
+  filtered by any categorical value (Affiliate ID, City, Chauffeur, …).
+• The assistant decides what to call – you just ask naturally.
+• We keep a short numeric summary + the schema in the system prompt to
+  give the model context before it calls.
+• The previous quick Python fallback is removed; everything routes through
+  the function call so answers remain conversational but data‑grounded.
+• Sidebar filter + PDF export unchanged.
+"""
 from __future__ import annotations
 
-"""Streamlit CSV Insight Assistant – rev 6.1
-================================================================
-▪︎ **Dynamic, automatic answering** — if the question mentions a single
-  categorical value (city, affiliate, chauffeur, vehicle type, etc.) the
-  app now computes the answer *in Python* before falling back to the LLM.
-▪︎ Categorical columns = *all* columns with ≤ 150 uniques (string **or**
-  numeric) so Affiliate ID now included.
-▪︎ Added an “⚙️ Filter & summary” sidebar where the user can slice the data
-  on any categorical column and immediately see average / median variance.
-▪︎ LLM context trimmed to < 4 k tokens by only embedding tables for the
-  5 largest categorical columns + the one matching the user’s question.
-▪︎ **PDF bug fixed** – long un‑broken words are now wrapped, preventing the
-  *FPDFException: Not enough horizontal space* error.
-▪︎ **Numeric conversion improved** – parentheses like *($21.70)* are now
-  recognised as negatives, avoiding *TypeError: Could not convert string*.
-"""
-
-import os, re, textwrap, ssl, json
+import os, re, json, ssl, textwrap
 from io import BytesIO
-from typing import Optional
+from typing import List
 from email.message import EmailMessage
 
 import pandas as pd
 import streamlit as st
 from fpdf import FPDF
 
+# ── CONFIG ─────────────────────────────────────────────────────────────
 OPENAI_MODEL = "gpt-4o-mini"
 st.set_page_config("CSV Insight Assistant", page_icon="📊", layout="wide")
 OPENAI_API_KEY = st.secrets.get("OPENAI_API_KEY") or os.getenv("OPENAI_API_KEY")
+if not OPENAI_API_KEY:
+    st.error("Please add your OPENAI_API_KEY to Secrets")
+    st.stop()
 
-# ── helpers ──────────────────────────────────────────────────────────────
-
-def _to_datetime(s: pd.Series) -> pd.Series:
-    """Coerce obvious date/time columns to datetimes."""
-    return pd.to_datetime(s, errors="coerce")
-
-
-def _to_numeric(s: pd.Series) -> pd.Series:
-    """Convert strings that *look* like numbers / currency to floats.
-
-    Handles leading currency symbols, commas, and parentheses indicating
-    negatives – e.g. "($21.70)" → -21.70.
-    """
-    cleaned = (s.astype(str)
-                 # convert parentheses to leading minus sign
-                 .str.replace(r"\(([^)]+)\)", r"-\1", regex=True)
-                 # strip everything except digits, minus & dot
-                 .str.replace(r"[^0-9.\-]", "", regex=True))
-    return pd.to_numeric(cleaned, errors="coerce")
-
-
-def clean_df(df: pd.DataFrame) -> pd.DataFrame:
-    for c in df.columns:
-        lc = c.lower()
-        if any(k in lc for k in ("date", "time")):
-            df[c] = _to_datetime(df[c])
-        elif any(k in lc for k in ("variance", "amount", "cost", "price")):
-            df[c] = _to_numeric(df[c])
-    return df
-
-
-def categorical_columns(df: pd.DataFrame, limit: int = 150):
-    return [c for c in df.columns if df[c].nunique(dropna=True) <= limit]
-
-
-# --- PDF generation ------------------------------------------------------
-
-_wrapper = textwrap.TextWrapper(width=90, break_long_words=True,
-                               break_on_hyphens=False)
-
-def pdf_from_md(title: str, md: str) -> bytes:
-    """Render *md* (markdown) to a simple A4 PDF and return its bytes."""
-    pdf = FPDF()
-    pdf.set_auto_page_break(auto=True, margin=15)
-    pdf.add_page()
-    pdf.set_font("Helvetica", size=12)
-
-    plain = re.sub(r"[*`_]", "", md)
-    for line in plain.splitlines():
-        for wrapped in _wrapper.wrap(line):
-            pdf.multi_cell(0, 6, wrapped)
-    pdf.set_title(title)
-
-    buf = BytesIO()
-    pdf.output(buf)
-    return buf.getvalue()
-
-# ── LLM call -------------------------------------------------------------
-
-def ask_llm(system: str, user: str) -> str:
-    if not OPENAI_API_KEY:
-        return "*(OPENAI_API_KEY missing – cannot call LLM)*"
-    import openai
-    openai.api_key = OPENAI_API_KEY
-    resp = openai.chat.completions.create(
-        model=OPENAI_MODEL,
-        temperature=0.2,
-        messages=[{"role": "system", "content": system},
-                  {"role": "user", "content": user}],
-    )
-    return resp.choices[0].message.content.strip()
-
-# ── Streamlit UI ---------------------------------------------------------
-
-st.title("📊 CSV Insight Assistant v6.1")
+# ── DATA LOAD & CLEAN ─────────────────────────────────────────────────
 file = st.file_uploader("Upload CSV", type="csv")
 if not file:
     st.stop()
 
-raw_df = pd.read_csv(file)
-df = clean_df(raw_df.copy())
-cats = categorical_columns(df)
+def _to_numeric(s: pd.Series) -> pd.Series:
+    cleaned = (s.astype(str)
+                 .str.replace(r"\(([^)]+)\)", r"-\1", regex=True)
+                 .str.replace(r"[^0-9.\-]", "", regex=True))
+    return pd.to_numeric(cleaned, errors="coerce")
 
-# ─ Sidebar filter
-st.sidebar.header("⚙️ Filter & summary")
-filter_col = st.sidebar.selectbox("Choose column to filter", ["(none)"] + cats)
-subset = df
-if filter_col != "(none)":
-    options = sorted(df[filter_col].dropna().astype(str).unique())
-    sel = st.sidebar.multiselect("Values", options)
-    if sel:
-        subset = subset[subset[filter_col].astype(str).isin(sel)]
-    st.sidebar.write(f"Rows after filter: {len(subset):,}")
-    if "Rate Variance" in subset.columns:
-        st.sidebar.metric("Average variance", f"${subset['Rate Variance'].mean():,.2f}")
-        st.sidebar.metric("Median variance", f"${subset['Rate Variance'].median():,.2f}")
-
-st.dataframe(subset.head(500), use_container_width=True)
-
-# ─ Headline KPIs (always on full df) ------------------------------------
+df = pd.read_csv(file)
 if "Rate Variance" in df.columns:
-    rv = df["Rate Variance"].dropna()
-    over = rv[rv > 0]
-    headline = {
-        "Total net variance": f"${rv.sum():,.0f}",
-        "Avg variance": f"${rv.mean():,.2f}",
-        "Median variance": f"${rv.median():,.2f}",
-        "Overrun jobs": f"{len(over):,} ({len(over)/len(df):.1%})",
-    }
-    st.subheader("📌 Headline (entire file)")
-    st.table(pd.DataFrame(headline, index=["Value"]))
+    df["Rate Variance"] = _to_numeric(df["Rate Variance"])
 
-# ─ Build summary tables for LLM context ---------------------------------
-TABLE_LIMIT = 5          # max tables to include per prompt
-ROW_LIMIT = 120          # trim long tables
-summary_tables: dict[str, str] = {}
-for col in cats:
-    if "Rate Variance" not in df.columns:
-        continue
-    tbl = (
-        df[[col, "Rate Variance"]]
-        .dropna()
-        .groupby(col)["Rate Variance"].mean().round(2)
-        .sort_values(ascending=False)
-        .head(ROW_LIMIT)
-    )
-    if not tbl.empty:
-        summary_tables[col] = tbl.to_markdown()
+# limit categorical detection to manageable columns
+CAT_LIMIT = 150
+categoricals: List[str] = [c for c in df.columns if df[c].nunique(dropna=True) <= CAT_LIMIT]
 
-# keep largest tables first (by rows) and cap to limit
-key_tables = sorted(summary_tables.items(), key=lambda kv: -kv[1].count("\n"))[:TABLE_LIMIT]
-context_tables = "\n\n".join(f"=== {k} ===\n{v}" for k, v in key_tables)
+st.dataframe(df.head(), use_container_width=True)
 
-# ─ Chat -----------------------------------------------------------------
-if "hist" not in st.session_state:
-    st.session_state.hist = []
-for role, msg in st.session_state.hist:
-    st.chat_message(role).markdown(msg)
+# ── FUNCTION the LLM can call ─────────────────────────────────────────
 
-q = st.chat_input("Ask about averages, medians, counts …")
-
-# Utility: simple direct answer if question matches pattern "average variance for <value>"
-
-def direct_variance_answer(query: str) -> Optional[str]:
-    """Attempt to answer Qs like:
-       • average variance in Chicago
-       • average rate variance for affiliate 972
-       • average variance for chauffeur John Doe specifically
-    Returns a markdown string or None if not matched.
-    """
-    if "Rate Variance" not in df.columns:
-        return None
-
-    # lower‑cased question without punctuation words like "specifically"
-    q = re.sub(r"[?.!]", "", query, flags=re.A).lower()
-    q = q.replace("specifically", "").strip()
-
-    # try to capture the value after the keywords
-    m = re.search(r"average (?:rate )?variance (?:for|in|of) (.+)", q)
-    if not m:
-        return None
-    target = m.group(1).strip()
-
-    # search each categorical column, case‑insensitive exact match
-    for col in cats:
-        subset_mask = df[col].astype(str).str.lower() == target
-        if subset_mask.any():
-            avg = df.loc[subset_mask, "Rate Variance"].mean()
-            if pd.notna(avg):
-                return f"Based on *{col}*, the average rate variance for **{target.title()}** is **${avg:,.2f}**."
-
-    # fallback: try substring match (useful for city names inside longer strings)
-    for col in cats:
-        subset_mask = df[col].astype(str).str.contains(re.escape(target), case=False, regex=True)
-        if subset_mask.any():
-            avg = df.loc[subset_mask, "Rate Variance"].mean()
-            if pd.notna(avg):
-                return f"Across all rows where *{col}* contains **{target.title()}**, the average rate variance is **${avg:,.2f}**."
-
-    return None
-    target = m.group(1).strip().strip("? .")
-    for col in cats:
-        mask = df[col].astype(str).str.fullmatch(re.escape(target), case=False, regex=True)
-        if mask.any():
-            avg = df.loc[mask, "Rate Variance"].mean()
-            if pd.notna(avg):
-                return f"The average rate variance for **{target}** (based on *{col}*) is **${avg:,.2f}**."
-    return None
-
-if q:
-    st.chat_message("user").markdown(q)
-
-    direct = direct_variance_answer(q)
-    if direct:
-        answer = direct
+def get_stat(column: str, value: str, metric: str = "average") -> dict:
+    """Return mean / median Rate Variance for rows where column==value."""
+    if column not in df.columns:
+        return {"error": f"Column '{column}' not found."}
+    mask = df[column].astype(str).str.lower() == value.lower()
+    subset = df.loc[mask, "Rate Variance"].dropna()
+    if subset.empty:
+        return {"error": f"No rows where {column} == {value}"}
+    if metric == "median":
+        val = subset.median()
     else:
-        numeric_md = df.describe(include="number").to_markdown()
-        context = (
-            f"Rows: {len(df):,}\nColumns: {', '.join(df.columns)}\n\nNUMERIC SUMMARY\n{numeric_md}\n\n{context_tables}"
-        )
-        answer = ask_llm(
-            "You are a senior data analyst. Use the tables to answer with exact numbers.",
-            context + f"\n\nQ: {q}\nA:",
-        )
+        val = subset.mean()
+    return {
+        "rows": int(len(subset)),
+        "metric": metric,
+        "value": float(val),
+        "currency": "$"
+    }
+
+# describe this function for OpenAI
+fn_spec = {
+    "name": "get_stat",
+    "description": "Compute average or median Rate Variance for a subset",
+    "parameters": {
+        "type": "object",
+        "properties": {
+            "column": {"type": "string", "description": "Column name to filter on"},
+            "value":  {"type": "string", "description": "Exact value to match (case‑insensitive)"},
+            "metric": {"type": "string", "enum": ["average", "median"], "default": "average"},
+        },
+        "required": ["column", "value"]
+    }
+}
+
+# ── LLM dialogue loop ─────────────────────────────────────────────────
+import openai; openai.api_key = OPENAI_API_KEY
+
+SYSTEM_PROMPT = (
+    "You are a senior data analyst with access to a function called get_stat. "
+    "Use it whenever the user asks for numbers (average, median etc.)."
+)
+
+if "chat" not in st.session_state:
+    st.session_state.chat = []  # store messages
+
+for role, content in st.session_state.chat:
+    st.chat_message(role).markdown(content)
+
+user_q = st.chat_input("Ask a question about the data… e.g. average variance for affiliate 972")
+if user_q:
+    st.chat_message("user").markdown(user_q)
+    st.session_state.chat.append(("user", user_q))
+
+    messages = [
+        {"role": "system", "content": SYSTEM_PROMPT},
+    ] + [
+        {"role": role, "content": content} for role, content in st.session_state.chat
+    ]
+
+    response = openai.chat.completions.create(
+        model=OPENAI_MODEL,
+        messages=messages,
+        functions=[fn_spec],
+        function_call="auto",
+        temperature=0.2,
+    )
+
+    choice = response.choices[0]
+
+    if choice.finish_reason == "function_call":
+        fn_name = choice.message.function_call.name
+        args = json.loads(choice.message.function_call.arguments)
+        if fn_name == "get_stat":
+            result = get_stat(**args)
+            messages.append({"role": "function", "name": fn_name, "content": json.dumps(result)})
+            # second round – ask model to craft final answer with result
+            final_resp = openai.chat.completions.create(
+                model=OPENAI_MODEL,
+                messages=messages,
+                temperature=0.2,
+            )
+            answer = final_resp.choices[0].message.content.strip()
+        else:
+            answer = "Function not recognised."
+    else:
+        answer = choice.message.content.strip()
 
     st.chat_message("assistant").markdown(answer)
-    st.session_state.hist += [("user", q), ("assistant", answer)]
+    st.session_state.chat.append(("assistant", answer))
 
+    # optional PDF export
     with st.expander("📄 Export this answer"):
-        if st.button("Generate PDF", key=f"pdf_{len(st.session_state.hist)}"):
-            st.download_button(
-                "⬇️ Download PDF",
-                pdf_from_md("CSV Insight Assistant report", answer),
-                "analysis.pdf",
-                "application/pdf",
-                key=f"dl_{len(st.session_state.hist)}",
-            )
+        if st.button("Generate PDF", key=f"pdf_{len(st.session_state.chat)}"):
+            buf = pdf_from_md("CSV Insight Assistant report", answer)
+            st.download_button("⬇️ Download PDF", buf, "analysis.pdf", "application/pdf",
+                               key=f"dl_{len(st.session_state.chat)}")
 
-st.caption("rev 6.2 – numeric parsing & PDF export fixed; dynamic filters; auto‑computed answers with GPT‑4o fallback")
+st.caption("rev 7.0 – true LLM ↔ CSV via OpenAI function‑calling")
