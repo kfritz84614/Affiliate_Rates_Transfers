@@ -57,21 +57,26 @@ if "Rate Variance" in df.columns:
 # ── FUNCTION DEFINITIONS ────────────────────────────────────────────────
 
 def aggregate(by: str, target: str, metric: str = "mean", top_n: int = 20) -> Dict:
-    """Group by *by*, compute metric on *target* and return top_n rows.
-    Safely avoids duplicate-column error when *by* == *target* by naming the
-    value column "Result".
+    """Group by *by*, compute metric on *target*, return top_n rows.
+    Avoids duplicate-column insert errors by renaming value column to "Result".
     """
     if by not in df.columns or target not in df.columns:
         return {"error": "column not found"}
+
     series = df.groupby(by)[target]
-    func = {"mean": series.mean, "median": series.median, "sum": series.sum, "count": series.count}[metric]
-    tbl = func().sort_values(ascending=False).head(top_n)
-    tbl = tbl.rename("Result").reset_index()  # avoids duplicate col name
-    return {"rows": tbl.to_dict(orient="records")} {"error": "column not found"}
-    series = df.groupby(by)[target]
-    func = {"mean": series.mean, "median": series.median, "sum": series.sum, "count": series.count}[metric]
-    tbl = func().sort_values(ascending=False).head(top_n)
-    return {"rows": tbl.reset_index().to_dict(orient="records")}
+    func_map = {
+        "mean": series.mean,
+        "median": series.median,
+        "sum": series.sum,
+        "count": series.count,
+    }
+    if metric not in func_map:
+        return {"error": "invalid metric"}
+
+    tbl = func_map[metric]().sort_values(ascending=False).head(top_n)
+    tbl = tbl.rename("Result").reset_index()
+    return {"rows": tbl.to_dict(orient="records")}
+.to_dict(orient="records")}
 
 def get_rows(where: Dict[str, str] | None = None, columns: List[str] | None = None, limit: int = 100) -> Dict:
     sub = df
