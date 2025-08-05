@@ -6,3 +6,4 @@ ydata-profiling>=4.7          # ProfileReport
 python-dotenv>=1.0            # local secrets
 openpyxl>=3.1
 fpdf2>=2.7                    # tiny, pure-py PDF generator
+tabulate>=0.9
