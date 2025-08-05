@@ -57,8 +57,17 @@ if "Rate Variance" in df.columns:
 # ── FUNCTION DEFINITIONS ────────────────────────────────────────────────
 
 def aggregate(by: str, target: str, metric: str = "mean", top_n: int = 20) -> Dict:
+    """Group by *by*, compute metric on *target* and return top_n rows.
+    Safely avoids duplicate-column error when *by* == *target* by naming the
+    value column "Result".
+    """
     if by not in df.columns or target not in df.columns:
         return {"error": "column not found"}
+    series = df.groupby(by)[target]
+    func = {"mean": series.mean, "median": series.median, "sum": series.sum, "count": series.count}[metric]
+    tbl = func().sort_values(ascending=False).head(top_n)
+    tbl = tbl.rename("Result").reset_index()  # avoids duplicate col name
+    return {"rows": tbl.to_dict(orient="records")} {"error": "column not found"}
     series = df.groupby(by)[target]
     func = {"mean": series.mean, "median": series.median, "sum": series.sum, "count": series.count}[metric]
     tbl = func().sort_values(ascending=False).head(top_n)
