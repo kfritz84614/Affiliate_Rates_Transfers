@@ -1,13 +1,12 @@
-"""Streamlit CSV Insight Assistant – rev 4.0
+"""Streamlit CSV Insight Assistant – rev 4.1
 ------------------------------------------------
-* Restores **headline summary** panel (top‑level KPIs)
-* Keeps optional **on‑demand PDF**
-* Ensures LLM gets rich context → quantitative answers
-* Still robust to currency strings / mixed types
+* Headline panel now shows **Average** _and_ Median variance
+* LLM context unchanged – still draws from `df.describe()`
+* PDF remains on‑demand via expander
 """
 from __future__ import annotations
 
-import re, textwrap, ssl
+import os, re, textwrap, ssl
 from io import BytesIO
 from email.message import EmailMessage
 
@@ -16,18 +15,13 @@ import plotly.express as px
 import streamlit as st
 from fpdf import FPDF
 
-# ╭───────────────────────── CONFIG ─────────────────────────╮
-OPENAI_MODEL = "gpt-4o-mini"      # choose gpt‑4o or gpt‑3.5‑turbo
+# ╭──────────────────── CONFIG ────────────────────╮
+OPENAI_MODEL = "gpt-4.1"
 st.set_page_config("CSV Insight Assistant", page_icon="📊", layout="wide")
-
-# read key once
 OPENAI_API_KEY = st.secrets.get("OPENAI_API_KEY") or os.getenv("OPENAI_API_KEY")
-if not OPENAI_API_KEY:
-    st.warning("Set OPENAI_API_KEY in Secrets for live LLM answers.")
+# ╰───────────────────────────────────────────────╯
 
-# ╰──────────────────────────────────────────────────────────╯
-
-# ── UTILITIES ───────────────────────────────────────────────
+# ── UTILITIES ────────────────────────────────────
 
 def _to_datetime(s: pd.Series) -> pd.Series:
     return pd.to_datetime(s, errors="coerce")
@@ -62,7 +56,7 @@ def pdf_from_md(title: str, md: str) -> bytes:
 
 def send_email(pdf: bytes, recipient: str):
     if not {"SMTP_HOST", "SMTP_USER", "SMTP_PASS"}.issubset(st.secrets):
-        st.warning("SMTP creds not configured in secrets."); return
+        st.warning("SMTP creds not configured."); return
     import smtplib
     msg = EmailMessage(); msg["To"] = recipient; msg["From"] = st.secrets["SMTP_USER"]
     msg["Subject"] = "CSV Insight Assistant report"; msg.set_content("Attached PDF.")
@@ -71,44 +65,41 @@ def send_email(pdf: bytes, recipient: str):
     with smtplib.SMTP_SSL(st.secrets["SMTP_HOST"], 465, context=ctx) as s:
         s.login(st.secrets["SMTP_USER"], st.secrets["SMTP_PASS"]); s.send_message(msg)
 
-# LLM helper – lazy‑import openai to avoid error if key missing
+# LLM helper
 
 def ask_llm(system: str, user: str) -> str:
     if not OPENAI_API_KEY:
-        return "*(No OPENAI_API_KEY – returning stub)*"
+        return "*(Add OPENAI_API_KEY to get LLM answers)*"
     import openai; openai.api_key = OPENAI_API_KEY
-    resp = openai.chat.completions.create(
-        model=OPENAI_MODEL,
-        messages=[{"role":"system","content":system},{"role":"user","content":user}],
-        temperature=0.2,
-    )
+    resp = openai.chat.completions.create(model=OPENAI_MODEL, messages=[
+        {"role":"system","content":system},
+        {"role":"user","content":user}
+    ], temperature=0.2)
     return resp.choices[0].message.content.strip()
 
-# ── APP ─────────────────────────────────────────────────────
+# ── APP ───────────────────────────────────────────
 
 st.title("📊 CSV Insight Assistant")
 file = st.file_uploader("Upload CSV", type="csv")
-if not file:
-    st.stop()
+if not file: st.stop()
 
-raw_df = pd.read_csv(file)
-df = clean_df(raw_df.copy())
-
+df = clean_df(pd.read_csv(file))
 st.dataframe(df.head(), use_container_width=True)
 
-# ── HEADLINE METRICS ───────────────────────────────────────
+# ── HEADLINE METRICS ─────────────────────────────
 if "Rate Variance" in df.columns:
     rv = df["Rate Variance"].dropna()
     over = rv[rv > 0]
     headline = {
         "Total net variance": f"${rv.sum():,.0f}",
+        "Average variance (mean)": f"${rv.mean():,.2f}",
+        "Median variance": f"${rv.median():,.2f}",
         "Jobs with an overrun": f"{len(over):,} ({len(over)/len(df):.1%})",
-        "Median overrun": f"${over.median():,.2f}",
     }
     st.subheader("📌 Headline summary")
     st.table(pd.DataFrame(headline, index=["Value"]))
 
-# ── CHAT HISTORY ───────────────────────────────────────────
+# ── CHAT ----------------------------------------------------------------
 if "hist" not in st.session_state: st.session_state.hist = []
 for role, msg in st.session_state.hist:
     st.chat_message(role).markdown(msg)
@@ -116,14 +107,12 @@ for role, msg in st.session_state.hist:
 question = st.chat_input("Ask a question about the dataset…")
 if question:
     st.chat_message("user").markdown(question)
-    # Build compact numeric context
     numeric_md = df.describe(include="number").to_markdown()
     context = f"Rows: {len(df):,}\nColumns: {', '.join(df.columns)}\n\nNUMERIC SUMMARY\n{numeric_md}"
     answer = ask_llm("You are a senior data analyst. Answer with specific numbers.", context + f"\n\nQ: {question}\nA:")
     st.chat_message("assistant").markdown(answer)
     st.session_state.hist += [("user", question), ("assistant", answer)]
 
-    # optional PDF on demand
     with st.expander("📄 Export this answer"):
         if st.button("Generate PDF", key=f"pdf_{len(st.session_state.hist)}"):
             pdf_bytes = pdf_from_md("CSV Insight Assistant report", answer)
@@ -131,13 +120,13 @@ if question:
             to = st.text_input("Email to…", key=f"email_{len(st.session_state.hist)}")
             if st.button("Send", key=f"send_{len(st.session_state.hist)}"):
                 send_email(pdf_bytes, to)
-                st.success("Sent (if SMTP configured).")
+                st.success("Sent (if SMTP set).")
 
-# ── OPTIONAL PROFILING ─────────────────────────────────────
+# ── OPTIONAL PROFILE ─────────────────────────────
 with st.expander("🔍 Detailed profile (ydata-profiling)"):
     if st.button("Generate profile"):
         from ydata_profiling import ProfileReport
         pr = ProfileReport(df, title="Profile", minimal=True)
         st.components.v1.html(pr.to_html(), height=800, scrolling=True)
 
-st.caption("v4.0 – headline summary restored • LLM answers require OPENAI key")
+st.caption("v4.1 – avg variance added • LLM requires API key")
