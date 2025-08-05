@@ -1,4 +1,4 @@
-# app.py – CSV-Insight Assistant 3.0
+# app.py – CSV-Insight Assistant 3.1
 import os, io, textwrap, smtplib, ssl, datetime
 from email.message import EmailMessage
 
@@ -9,16 +9,17 @@ from openai import OpenAI
 from ydata_profiling import ProfileReport
 from fpdf import FPDF
 
-# ────────────────────────── config ──────────────────────────
+# ── CONFIG ────────────────────────────────────────────────────────────────
 st.set_page_config("CSV Insight Assistant", layout="wide")
+
 OPENAI_API_KEY = st.secrets.get("OPENAI_API_KEY", os.getenv("OPENAI_API_KEY"))
 if not OPENAI_API_KEY:
     st.error("Set OPENAI_API_KEY in Streamlit secrets"); st.stop()
 
-MODEL = "gpt-4o-mini"
+MODEL  = "gpt-4o-mini"
 client = OpenAI(api_key=OPENAI_API_KEY)
 
-# ────────────────────────── helpers ──────────────────────────
+# ── HELPERS ───────────────────────────────────────────────────────────────
 @st.cache_data(show_spinner=False)
 def read_csv(buf: io.BytesIO) -> pd.DataFrame:
     return pd.read_csv(buf)
@@ -37,18 +38,20 @@ def chat(system: str, user: str) -> str:
     return resp.choices[0].message.content.strip()
 
 def generate_pdf(title: str, body_md: str) -> bytes:
+    """Render a one-page PDF; force-wrap long words so FPDF never errors."""
     pdf = FPDF()
     pdf.set_auto_page_break(auto=True, margin=15)
     pdf.add_page()
     pdf.set_font("Helvetica", size=12)
 
-    plain = body_md.replace("**", "").replace("`", "")
+    wrapper = textwrap.TextWrapper(width=90, break_long_words=True)
+    plain   = body_md.replace("**", "").replace("`", "")
     for line in plain.splitlines():
-        for wrapped in textwrap.wrap(line, width=90):
+        for wrapped in wrapper.wrap(line):
             pdf.multi_cell(0, 6, wrapped)
 
     pdf.set_title(title)
-    return bytes(pdf.output())
+    return bytes(pdf.output())          # fpdf2 returns a bytearray
 
 def send_email(pdf_bytes: bytes, recipient: str):
     if "SMTP_USER" not in st.secrets:
@@ -67,7 +70,7 @@ def send_email(pdf_bytes: bytes, recipient: str):
         s.login(st.secrets["SMTP_USER"], st.secrets["SMTP_PASS"])
         s.send_message(msg)
 
-# ────────────────────────── app ──────────────────────────
+# ── APP ───────────────────────────────────────────────────────────────────
 st.title("📊 CSV Insight Assistant")
 
 uploaded = st.file_uploader("Upload a CSV", type="csv")
@@ -76,21 +79,23 @@ if not uploaded:
 
 df = read_csv(uploaded)
 
-# Clean currency-looking numeric columns (add more if needed)
-currency_cols = ["Rate Variance", "Estimate Amount"]
-for col in currency_cols:
+# --- CLEAN CURRENCY COLUMNS ----------------------------------------------
+CURRENCY_COLS = ["Rate Variance", "Estimate Amount"]    # extend as needed
+for col in CURRENCY_COLS:
     if col in df.columns:
         df[col] = (
-            df[col].astype(str)
-                   .str.replace(r"[^\d.\-]", "", regex=True)
-                   .replace("", pd.NA)
-                   .astype(float)
+            df[col]
+              .astype(str)
+              .str.replace(r"[^\d.\-]", "", regex=True)
+              .replace("", pd.NA)
+              .astype(float)
         )
+# -------------------------------------------------------------------------
 
 st.success(f"Loaded **{uploaded.name}** – {len(df):,} rows × {len(df.columns)} cols")
 st.dataframe(df.head(), use_container_width=True)
 
-# 1️⃣ HEADLINE ANALYSIS -------------------------------------------------
+# 1️⃣ HEADLINE ANALYSIS ----------------------------------------------------
 with st.spinner("Crunching headline stats…"):
     rv   = df["Rate Variance"]
     over = rv[rv > 0]
@@ -103,18 +108,18 @@ with st.spinner("Crunching headline stats…"):
     }
 
     # MoM drift
-    date_col = None
-    for c in df.columns:
-        if "date" in c.lower():
-            date_col = c; break
+    date_col = next((c for c in df.columns if "date" in c.lower()), None)
     if date_col:
-        df["Month"] = pd.to_datetime(df[date_col]).dt.to_period("M")
-        mom = (
-            df.groupby("Month")["Rate Variance"].mean()
-              .rename("Avg Δ")
-              .to_frame()
+        df["Month"] = (
+            pd.to_datetime(df[date_col], errors="coerce")
+              .dt.to_period("M")
+              .astype(str)                       # JSON-friendly
         )
-        mom_fig = px.line(mom.reset_index(),
+        mom = (df.groupby("Month")["Rate Variance"]
+                 .mean()
+                 .rename("Avg Δ")
+                 .to_frame())
+        mom_fig = px.line(mom.reset_index().sort_values("Month"),
                           x="Month", y="Avg Δ",
                           title="Average Variance by Month")
     else:
@@ -130,10 +135,10 @@ with st.spinner("Crunching headline stats…"):
              .sort_values("avg_delta", ascending=False)
              .head(10)
              .reset_index())
-    hot["avg_delta"] = hot["avg_delta"].round(2)
-    hot["over_share"]= (hot["over_share"]*100).round(1).astype(str)+" %"
+    hot["avg_delta"]  = hot["avg_delta"].round(2)
+    hot["over_share"] = (hot["over_share"]*100).round(1).astype(str) + " %"
 
-    # Consistent savings
+    # Consistent savers
     savers = (df.groupby(aff_col)
                 .agg(jobs=("Rate Variance", "size"),
                      avg_delta=("Rate Variance", "mean"))
@@ -143,11 +148,10 @@ with st.spinner("Crunching headline stats…"):
                 .reset_index())
     savers["avg_delta"] = savers["avg_delta"].round(2)
 
-# Show headline table
+# Display headline + tables
 st.subheader("Headline Findings")
 st.table(pd.DataFrame(headline, index=["Value"]).T)
 
-# 2️⃣ PLOTS & TABLES ----------------------------------------------------
 st.subheader("Overrun hot-spots (≥10 jobs)")
 st.table(hot)
 
@@ -158,21 +162,21 @@ if mom_fig:
     st.subheader("Month-over-month drift")
     st.plotly_chart(mom_fig, use_container_width=True)
 
-# 3️⃣ PROFILE (unchanged) ----------------------------------------------
+# 2️⃣ OPTIONAL PROFILE -----------------------------------------------------
 with st.expander("🔍 Detailed ydata-profiling report"):
     if st.button("Generate profile"):
         with st.spinner("Profiling…"):
             pr = make_profile(df)
         st.components.v1.html(pr.to_html(), height=800, scrolling=True)
 
-# 4️⃣ CHAT --------------------------------------------------------------
+# 3️⃣ CHAT -----------------------------------------------------------------
 st.subheader("💬 Ask follow-up questions")
 
 if "chat_hist" not in st.session_state:
     st.session_state.chat_hist = []
 
-for role, text in st.session_state.chat_hist:
-    st.chat_message(role).markdown(text)
+for role, msg in st.session_state.chat_hist:
+    st.chat_message(role).markdown(msg)
 
 q = st.chat_input("Ask a question about this dataset")
 if q:
@@ -185,7 +189,7 @@ if q:
         "SAVERS": savers.to_markdown(index=False),
     }
     if mom_fig:
-        ctx_tables["MOM"] = mom[["Avg Δ"]].to_markdown()
+        ctx_tables["MOM"] = mom.to_markdown()
 
     context = "\n\n".join(
         f"=== {name} ===\n{tbl}" for name, tbl in ctx_tables.items()
@@ -198,7 +202,7 @@ if q:
     st.chat_message("assistant").markdown(ans)
     st.session_state.chat_hist += [("user", q), ("assistant", ans)]
 
-    # 5️⃣ PDF download / email -----------------------------------------
+    # PDF download / email
     pdf_bytes = generate_pdf("CSV Insight Assistant report", ans)
     st.download_button("⬇️ Download answer as PDF", pdf_bytes,
                        file_name="analysis.pdf", mime="application/pdf")
