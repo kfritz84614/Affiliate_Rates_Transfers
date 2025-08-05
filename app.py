@@ -40,7 +40,11 @@ def generate_pdf(title: str, body_md: str) -> bytes:
     for line in body_md.splitlines():
         pdf.multi_cell(0, 6, line)
     pdf.set_title(title)
-    return pdf.output(dest="S").encode()
+
+    # ↓↓↓ PASTE THE 3 LINES BELOW *INSTEAD* OF THE OLD return LINE ↓↓↓
+    raw = pdf.output(dest="S")          # fpdf2 returns a bytearray
+    return bytes(raw)                   # convert to plain bytes
+    # ↑↑↑———————————————————————————————————————————————↑↑↑
 
 def send_email(pdf_bytes: bytes, recipient: str):
     if "SMTP_USER" not in st.secrets:        # abort silently for demo
