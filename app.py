@@ -39,7 +39,7 @@ def chat_completion(system_prompt: str, user_prompt: str) -> str:
     return resp.choices[0].message.content.strip()
 
 def generate_pdf(title: str, body_md: str) -> bytes:
-    """Render a one-page PDF from plain text."""
+    """Render a one-page PDF from plain text (wrap long lines)."""
     pdf = FPDF()
     pdf.set_auto_page_break(auto=True, margin=15)
     pdf.add_page()
@@ -47,11 +47,12 @@ def generate_pdf(title: str, body_md: str) -> bytes:
 
     plain = body_md.replace("**", "").replace("`", "")
     for line in plain.splitlines():
-        for wrapped in textwrap.wrap(line, width=90):            # avoid long lines
+        for wrapped in textwrap.wrap(line, width=90):
             pdf.multi_cell(0, 6, wrapped)
 
     pdf.set_title(title)
-    return bytes(pdf.output())                                   # fpdf2 returns bytes
+    return bytes(pdf.output())             # fpdf2 already returns a bytearray
+                                   # fpdf2 returns bytes
 
 def send_email(pdf_bytes: bytes, recipient: str):
     if "SMTP_USER" not in st.secrets:
@@ -74,10 +75,24 @@ def send_email(pdf_bytes: bytes, recipient: str):
 st.title("📊 CSV Insight Assistant")
 
 uploaded = st.file_uploader("Upload a CSV", type="csv")
-if not uploaded:
+if not uploaded:                          # (unchanged)
     st.stop()
 
 df = read_csv(uploaded)
+
+# ✱ NEW — force numeric on any currency-looking column -----------------
+currency_cols = ["Rate Variance"]          # add others if needed
+for col in currency_cols:
+    if col in df.columns:
+        df[col] = (
+            df[col]
+              .astype(str)                 # be safe
+              .str.replace(r"[^\d.\-]", "", regex=True)  # strip $ and commas
+              .replace("", pd.NA)          # empty → NaN
+              .astype(float)
+        )
+
+# ----------------------------------------------------------------------
 st.success(f"Loaded **{uploaded.name}** – {len(df):,} rows × {len(df.columns)} cols")
 st.dataframe(df.head(), use_container_width=True)
 
