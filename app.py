@@ -174,9 +174,42 @@ q = st.chat_input("Ask about averages, medians, counts …")
 # Utility: simple direct answer if question matches pattern "average variance for <value>"
 
 def direct_variance_answer(query: str) -> Optional[str]:
-    m = re.search(r"average (?:rate )?variance (?:for|in) (.+?)$", query, re.I)
-    if not m or "Rate Variance" not in df.columns:
+    """Attempt to answer Qs like:
+       • average variance in Chicago
+       • average rate variance for affiliate 972
+       • average variance for chauffeur John Doe specifically
+    Returns a markdown string or None if not matched.
+    """
+    if "Rate Variance" not in df.columns:
         return None
+
+    # lower‑cased question without punctuation words like "specifically"
+    q = re.sub(r"[?.!]", "", query, flags=re.A).lower()
+    q = q.replace("specifically", "").strip()
+
+    # try to capture the value after the keywords
+    m = re.search(r"average (?:rate )?variance (?:for|in|of) (.+)", q)
+    if not m:
+        return None
+    target = m.group(1).strip()
+
+    # search each categorical column, case‑insensitive exact match
+    for col in cats:
+        subset_mask = df[col].astype(str).str.lower() == target
+        if subset_mask.any():
+            avg = df.loc[subset_mask, "Rate Variance"].mean()
+            if pd.notna(avg):
+                return f"Based on *{col}*, the average rate variance for **{target.title()}** is **${avg:,.2f}**."
+
+    # fallback: try substring match (useful for city names inside longer strings)
+    for col in cats:
+        subset_mask = df[col].astype(str).str.contains(re.escape(target), case=False, regex=True)
+        if subset_mask.any():
+            avg = df.loc[subset_mask, "Rate Variance"].mean()
+            if pd.notna(avg):
+                return f"Across all rows where *{col}* contains **{target.title()}**, the average rate variance is **${avg:,.2f}**."
+
+    return None
     target = m.group(1).strip().strip("? .")
     for col in cats:
         mask = df[col].astype(str).str.fullmatch(re.escape(target), case=False, regex=True)
@@ -215,4 +248,4 @@ if q:
                 key=f"dl_{len(st.session_state.hist)}",
             )
 
-st.caption("rev 6.1 – numeric parsing & PDF export fixed; dynamic filters; auto‑computed answers with GPT‑4o fallback")
+st.caption("rev 6.2 – numeric parsing & PDF export fixed; dynamic filters; auto‑computed answers with GPT‑4o fallback")
