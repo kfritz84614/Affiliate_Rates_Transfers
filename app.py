@@ -60,13 +60,9 @@ def force_dtypes(df: pd.DataFrame) -> pd.DataFrame:
 
 @st.cache_data(show_spinner=False)
 def make_profile(df: pd.DataFrame) -> ProfileReport:
-    cfg = {
-        "correlations": {"pearson": False, "spearman": False, "kendall": False,
-                         "phi_k": False, "cramers": False, "recoded": False},
-        "missing_diagrams": {"heatmap": False, "dendrogram": False},
-        "samples": {"head": 0, "tail": 0},
-    }
-    return ProfileReport(df, title="Data profile", minimal=True, config=cfg)
+    # minimal=True already disables correlations, missing‐value heatmaps, etc.
+    # so we no longer need a custom config dict.
+    return ProfileReport(df, title="Data profile", minimal=True)
 
 def chat(sys: str, usr: str) -> str:
     m = [{"role":"system","content":sys},{"role":"user","content":usr}]
