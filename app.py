@@ -1,264 +1,311 @@
-import streamlit as st
+"""
+Streamlit CSV Explorer – v9.0 (2025‑08‑06)
+------------------------------------------------
+• Upload any CSV ➜ automatic cleaning & type coercion
+• GPT‑4o‑mini function‑calling for questions & chart suggestions
+• Auto‑render up to 5 LLM‑picked Plotly charts on load
+• PDF export, cost logging, and rock‑solid error handling
+"""
+
+from __future__ import annotations
+
+import json
+import textwrap
+import time
+from io import BytesIO
+from typing import Any, Dict, List, Tuple
+
+import openai
 import pandas as pd
-import openai, time, random, logging, json, hashlib
 import plotly.express as px
+import streamlit as st
 from fpdf import FPDF
 
-OPENAI_MODEL = "gpt-4o-mini"
+# ── Config & global objects ──────────────────────────────────────────────
 
-# ──────────────────────────  OpenAI helper  ────────────────────────── #
+st.set_page_config(
+    page_title="CSV Explorer AI",
+    layout="wide",
+    initial_sidebar_state="expanded",
+)
 
-def chat_with_retry(**kwargs):
-    """Call OpenAI with exponential back‑off on HTTP 429."""
-    for attempt in range(6):
-        try:
-            return openai.chat.completions.create(**kwargs)
-        except Exception as e:
-            if getattr(e, "status", None) != 429:
-                raise
-            wait = 2 ** attempt + random.random()
-            logging.warning("Rate‑limited – retrying in %.1fs…", wait)
-            time.sleep(wait)
-    raise RuntimeError("OpenAI retries exhausted")
+openai.api_key = st.secrets["OPENAI_API_KEY"]
+MODEL = "gpt-4o-mini"
 
-# ───────────────────────────  Data utilities  ───────────────────────── #
+# cost tracker (rough calc – update if model pricing changes)
+TOKEN_PRICE_USD = 0.00001  # ≈ $0.01 per 1k tokens → adjust as needed
+if "_cost_usd" not in st.session_state:
+    st.session_state._cost_usd = 0.0
 
-@st.cache_data(show_spinner=False)
-def to_number(s: pd.Series) -> pd.Series:
-    return (
-        s.astype(str)
-        .str.replace(r"[^0-9.\-()]", "", regex=True)
-        .str.replace(r"\((.*)\)", r"-\1", regex=True)
-        .astype(float)
-        .round(2)
-    )
+def _add_cost(token_count: int) -> None:
+    st.session_state._cost_usd += token_count * TOKEN_PRICE_USD / 1000
+
+# ── Helpers: data cleaning & caching ─────────────────────────────────────
 
 @st.cache_data(show_spinner=False)
-def load_dataframe(file) -> pd.DataFrame:
+def load_csv(file) -> pd.DataFrame:
+    """Read CSV to DataFrame and coerce numerics / dates."""
     df = pd.read_csv(file)
-    for col in df.select_dtypes(include="object"):
+
+    # Numeric coercion – only columns that *look* numeric
+    for col in df.columns:
+        if pd.api.types.is_numeric_dtype(df[col]):
+            continue
+        sample = df[col].head(20).astype(str).str.replace(r"[\s,$%()]", "", regex=True)
+        pct_numericish = (sample.str.match(r"^-?\d*[\.,]?\d+$").mean())
+        if pct_numericish > 0.8:
+            df[col] = (
+                df[col]
+                .astype(str)
+                .str.replace(r"[,$%]", "", regex=True)
+                .str.replace("(", "-", regex=False)
+                .str.replace(")", "", regex=False)
+            )
+            df[col] = pd.to_numeric(df[col], errors="coerce")
+
+    # Datetime coercion
+    for col in df.columns:
+        if pd.api.types.is_datetime64_any_dtype(df[col]):
+            continue
         try:
-            df[col] = to_number(df[col])
+            df[col] = pd.to_datetime(df[col])
         except Exception:
             pass
+
     return df
 
-@st.cache_data(show_spinner=False)
-def aggregate(df: pd.DataFrame, by: str, target: str, metric: str = "mean", top_n: int | None = None):
-    res = (
-        df.groupby(by)[target]
-        .agg({"mean": "mean", "median": "median", "sum": "sum"}.get(metric, "mean"))
-        .sort_values(ascending=False)
-    )
+# ── LLM function helpers exposed to GPT ──────────────────────────────────
+
+def aggregate(by: str, target: str | None, metric: str = "sum", top_n: int | None = None) -> pd.DataFrame:  # noqa: D401
+    """Group *df* (from session) by *by* column and compute *metric* on *target*.
+
+    metric: sum | mean | count
+    """
+    df = st.session_state.df
+    if target is None:
+        target = df.columns[0]
+    if metric == "count":
+        ser = df.groupby(by)[target].count()
+    elif metric == "mean":
+        ser = df.groupby(by)[target].mean()
+    else:
+        ser = df.groupby(by)[target].sum()
+    out = ser.reset_index().rename(columns={target: metric})
     if top_n:
-        res = res.head(int(top_n))
-    return res.reset_index().rename({target: "Result"}, axis=1)
+        out = out.nlargest(top_n, metric)
+    return out
 
-@st.cache_data(show_spinner=False)
-def get_rows(df: pd.DataFrame, where: str, columns: list[str] | None = None, limit: int = 5):
-    view = df.query(where)
+def get_rows(where: str, columns: List[str] | None = None, limit: int = 20) -> pd.DataFrame:
+    """Return rows matching a pandas-query style *where* expression."""
+    df = st.session_state.df
+    try:
+        subset = df.query(where)
+    except Exception as e:
+        st.warning(f"❌ Bad query: {e}")
+        return pd.DataFrame()
     if columns:
-        view = view[columns]
-    return view.head(limit)
+        subset = subset[columns]
+    return subset.head(limit)
 
-# ─────────────────────  LLM‑guided chart suggestions  ─────────────────── #
-
-@st.cache_data(show_spinner=False)
-def suggest_charts(df: pd.DataFrame, n: int = 5):
-    """Ask GPT‑4o for up to `n` chart specs helpful for business insight."""
-    summary = {
-        "n_rows": len(df),
-        "columns": {c: str(t) for c, t in df.dtypes.items()},
-        "numeric_summary": df.describe(include="number").round(2).to_dict(),
-        "categorical_nunique": {c: int(df[c].nunique()) for c in df.select_dtypes("object").columns},
-    }
-
-    fn_schema = {
-        "name": "chart_suggestions",
-        "description": "Return up to 5 helpful chart specs",
+FUNCTIONS_SPEC = [
+    {
+        "name": "aggregate",
+        "description": "Grouped statistics of the dataset",
         "parameters": {
             "type": "object",
             "properties": {
-                "charts": {
-                    "type": "array",
-                    "items": {
-                        "type": "object",
-                        "properties": {
-                            "type": {"type": "string", "enum": ["bar", "line", "scatter", "heatmap"]},
-                            "x": {"type": "string"},
-                            "y": {"type": "string"},
-                            "metric": {"type": "string", "enum": ["sum", "mean", "count", "none"], "default": "none"},
-                            "title": {"type": "string"},
-                        },
-                        "required": ["type", "x", "y"],
-                    },
-                    "minItems": 1,
-                    "maxItems": 5,
-                }
+                "by": {"type": "string"},
+                "target": {"type": ["string", "null"]},
+                "metric": {"type": "string", "enum": ["sum", "mean", "count"]},
+                "top_n": {"type": ["integer", "null"]},
             },
-            "required": ["charts"],
+            "required": ["by"],
         },
-    }
+    },
+    {
+        "name": "get_rows",
+        "description": "Filter raw rows by expression",
+        "parameters": {
+            "type": "object",
+            "properties": {
+                "where": {"type": "string"},
+                "columns": {"type": ["array", "null"], "items": {"type": "string"}},
+                "limit": {"type": "integer"},
+            },
+            "required": ["where"],
+        },
+    },
+]
 
-    resp = chat_with_retry(
-        model=OPENAI_MODEL,
-        messages=[
-            {"role": "system", "content": "You are a senior data analyst. Based on the dataframe summary, suggest up to five charts that would help leaders make strategic decisions."},
-            {"role": "user", "content": json.dumps(summary)},
-        ],
-        functions=[fn_schema],
-        function_call={"name": "chart_suggestions"},
-        temperature=0.2,
-    )
+# ── LLM helpers ──────────────────────────────────────────────────────────
 
-    try:
-        charts = json.loads(resp.choices[0].message.function_call.arguments)["charts"]
-    except Exception:
-        charts = []
-    return charts[:n]
+def call_llm(messages: List[Dict[str, Any]], functions: List[Dict[str, Any]] | None = None) -> Dict[str, Any]:
+    """Wrapper with retry & cost tracking."""
+    for attempt in range(5):
+        try:
+            response = openai.chat.completions.create(
+                model=MODEL,
+                messages=messages,
+                functions=functions,
+            )
+            _add_cost(response.usage.total_tokens)  # type: ignore[attr-defined]
+            return response
+        except openai.RateLimitError:
+            delay = 2 ** attempt
+            time.sleep(delay)
+    raise RuntimeError("OpenAI API failed after retries")
+
+# ── UI: Sidebar upload & cleaning ───────────────────────────────────────
+
+with st.sidebar:
+    st.markdown("## 📤 Upload CSV")
+    uploaded = st.file_uploader("Choose file", type=["csv"])
+    if uploaded:
+        st.session_state.df = load_csv(uploaded)
+        st.success("File loaded & cleaned!")
+        st.session_state.messages = [
+            {
+                "role": "system",
+                "content": "You are a data analyst. Use helper functions when appropriate."
+            }
+        ]
+        # reset charts when new file uploaded
+        st.session_state.pop("_charts_rendered", None)
+        st.session_state.pop("_chart_specs", None)
+
+    # show cost so far
+    st.markdown(f"**Usage cost:** ${st.session_state._cost_usd:.4f}")
+
+# ── Main layout blocks ──────────────────────────────────────────────────
+
+def show_headline_kpis(df: pd.DataFrame):
+    col1, col2, col3 = st.columns(3)
+    col1.metric("Rows", len(df))
+    numeric_cols = df.select_dtypes("number").columns
+    if not numeric_cols.empty:
+        col2.metric("Σ of first numeric col", f"{df[numeric_cols[0]].sum():,.0f}")
+        overruns = numeric_cols.intersection([c for c in df.columns if "overrun" in c.lower()])
+        if not overruns.empty:
+            share = (df[overruns[0]] > 0).mean() * 100
+            col3.metric("Over‑run share", f"{share:.1f}%")
 
 
-def render_chart(df: pd.DataFrame, spec: dict):
-    ct, x, y = spec["type"], spec["x"], spec["y"]
-    metric = spec.get("metric", "none")
-    title = spec.get("title") or f"{ct.title()} of {y} by {x}"
-
-    if ct == "bar":
-        data = (
-            df.groupby(x)[y].agg(metric).reset_index().rename({y: "value"}, axis=1)
-            if metric != "none" else df
-        )
-        fig = px.bar(data, x=x, y="value" if metric != "none" else y, title=title, text_auto=".2s")
-    elif ct == "line":
-        data = (
-            df.groupby(x)[y].agg(metric).reset_index().rename({y: "value"}, axis=1)
-            if metric != "none" else df
-        )
-        fig = px.line(data, x=x, y="value" if metric != "none" else y, title=title)
-    elif ct == "scatter":
-        fig = px.scatter(df, x=x, y=y, title=title)
-    elif ct == "heatmap":
-        fig = px.density_heatmap(df, x=x, y=y, title=title)
-    else:
+def render_chart(spec: Dict[str, str]):
+    """Create Plotly chart from a minimal spec."""
+    chart_type = spec.get("type", "bar")
+    x = spec.get("x")
+    y = spec.get("y")
+    agg = spec.get("agg", "sum")
+    df = st.session_state.df
+    if not (x and y):
+        st.warning("Spec missing x or y – skipping chart")
         return
+    if agg == "count":
+        df_plot = df.groupby(x)[y].count().reset_index(name="count")
+        y = "count"
+    else:
+        df_plot = df.groupby(x)[y].agg(agg).reset_index()
+    if chart_type == "line":
+        fig = px.line(df_plot, x=x, y=y)
+    elif chart_type == "scatter":
+        fig = px.scatter(df_plot, x=x, y=y)
+    elif chart_type == "heatmap":
+        fig = px.density_heatmap(df, x=x, y=y)
+    else:
+        fig = px.bar(df_plot, x=x, y=y)
     st.plotly_chart(fig, use_container_width=True)
 
-# ───────────────────────────────  Streamlit UI  ───────────────────────────── #
 
-st.set_page_config(page_title="CSV Insight", layout="wide")
+if df := st.session_state.get("df"):
+    show_headline_kpis(df)
 
-st.title("📊 CSV Insight v8·5 – LLM‑Recommended Charts")
-
-uploaded = st.file_uploader("Drop a CSV", type=["csv"])
-if uploaded:
-    file_sha = hashlib.md5(uploaded.getvalue()).hexdigest()
-    if st.session_state.get("file_sha") != file_sha:
-        st.session_state.clear()  # reset prior state
-        st.session_state["df"] = load_dataframe(uploaded)
-        st.session_state["file_sha"] = file_sha
-        st.session_state["chart_specs"] = suggest_charts(st.session_state["df"], n=5)
-
-    df = st.session_state["df"]
-    chart_specs = st.session_state.get("chart_specs", [])
-
-    # ── Headline KPIs ────────────────────────────────────────────────
-    c1, c2, c3, c4 = st.columns(4)
-    c1.metric("Rows", f"{len(df):,}")
-    num_cols = df.select_dtypes("number").columns
-    if num_cols.any():
-        c2.metric("Total", f"{df[num_cols].sum().sum():,.0f}")
-        c3.metric("Mean", f"{df[num_cols].mean().mean():,.2f}")
-        overruns = df.filter(regex="over.?run", axis=1)
-        share = (overruns.gt(0).mean().mean()*100) if not overruns.empty else 0
-        c4.metric("Over‑run share", f"{share:.1f}%")
-
-       # ── LLM-recommended charts ──────────────────────────────────────
-    if chart_specs:
-        with st.expander("📈 Recommended Charts", expanded=True):
-            for spec in chart_specs:
-                render_chart(df, spec)
-
-    # ── Chat input section (aggregate / rows) ────────────────────────
-    prompt = st.chat_input("Ask anything about your data…")
-    if prompt:
-        sys = (
-            "You are a data analyst. Functions: aggregate, get_rows. "
-            "Dataframe description:\n" + df.describe(include='all').to_string()
+    # ── LLM‑recommended charts on first load ────────────────
+    if "_charts_rendered" not in st.session_state:
+        user_prompt = "Provide up to 5 useful chart specs (json) for this dataset. Return a JSON list."
+        resp = call_llm(
+            messages=[{"role": "user", "content": user_prompt}],
+            functions=None,
         )
-        resp = chat_with_retry(
-            model=OPENAI_MODEL,
-            messages=[
-                {"role": "system", "content": sys},
-                {"role": "user", "content": prompt},
-            ],
-            functions=[
-                {
-                    "name": "aggregate",
-                    "description": "Group & summarise a numeric column",
-                    "parameters": {
-                        "type": "object",
-                        "properties": {
-                            "by": {"type": "string"},
-                            "target": {"type": "string"},
-                            "metric": {"type": "string", "enum": ["mean", "median", "sum"]},
-                            "top_n": {"type": "integer", "minimum": 1},
-                        },
-                        "required": ["by", "target"],
-                    },
-                },
-                {
-                    "name": "get_rows",
-                    "description": "Return raw rows matching a condition",
-                    "parameters": {
-                        "type": "object",
-                        "properties": {
-                            "where": {"type": "string"},
-                            "columns": {"type": "array", "items": {"type": "string"}},
-                            "limit": {"type": "integer", "minimum": 1},
-                        },
-                        "required": ["where"],
-                    },
-                },
-            ],
-            function_call="auto",
-            temperature=0.2,
-        )
+        try:
+            charts = json.loads(resp.choices[0].message.content)
+            st.session_state._chart_specs = charts[:5]
+        except Exception:
+            st.session_state._chart_specs = []
+        st.session_state._charts_rendered = True
 
-        m = resp.choices[0].message
-        if m.function_call:
-            fn = m.function_call.name
-            args = json.loads(m.function_call.arguments or "{}")
-            if fn == "aggregate":
-                out = aggregate(df, **args)
-                st.session_state["last_answer"] = out.to_string()
-                st.dataframe(out)
-                if not out.empty:
-                    fig = px.bar(
-                        out,
-                        x=out.columns[0],
-                        y="Result",
-                        text_auto=".2s",
-                        title=f"{args.get('metric','mean').title()} of {args['target']} by {args['by']}",
-                        height=450,
-                    )
-                    st.plotly_chart(fig, use_container_width=True)
-            elif fn == "get_rows":
-                out = get_rows(df, **args)
-                st.session_state["last_answer"] = out.to_string()
-                st.dataframe(out)
+    for spec in st.session_state.get("_chart_specs", []):
+        try:
+            render_chart(spec)
+        except Exception as e:
+            st.warning(f"Chart skipped – {e}")
+
+        # ── Chat interface ──────────────────────────────────────
+    st.divider()
+    st.markdown("### 💬 Ask questions about your data")
+
+    # replay prior conversation (skip the initial system prompt)
+    for msg in st.session_state.get("messages", [])[1:]:
+        with st.chat_message(msg["role"]):
+            st.markdown(msg["content"])
+
+    # user prompt box
+    if prompt := st.chat_input("Ask anything…"):
+        # store + echo the user message
+        st.session_state.messages.append({"role": "user", "content": prompt})
+        with st.chat_message("user"):
+            st.markdown(prompt)
+
+        # call the model (with function-calling enabled)
+        response = call_llm(st.session_state.messages, functions=FUNCTIONS_SPEC)
+        msg = response.choices[0].message
+
+        if msg.function_call:               # model chose a helper
+            func_name = msg.function_call.name
+            args = json.loads(msg.function_call.arguments or "{}")
+
+            if func_name == "aggregate":
+                table = aggregate(**args)
+            elif func_name == "get_rows":
+                table = get_rows(**args)
+            else:
+                table = pd.DataFrame()
+
+            with st.chat_message("assistant"):
+                st.markdown(f"### Result of `{func_name}`")
+                st.dataframe(table, use_container_width=True)
+
+            st.session_state.messages.append(
+                {"role": "assistant",
+                 "content": f"Executed `{func_name}` with args `{args}`."}
+            )
+
+        else:                               # free-text answer
+            content = msg.content
+            with st.chat_message("assistant"):
+                st.markdown(content)
+            st.session_state.messages.append(
+                {"role": "assistant", "content": content}
+            )
+
+    # ── PDF export of last assistant message ───────────────
+    if st.button("Generate PDF of last answer"):
+        if st.session_state.messages and st.session_state.messages[-1]["role"] == "assistant":
+            pdf = FPDF()
+            pdf.set_auto_page_break(auto=True, margin=15)
+            pdf.add_page()
+            pdf.set_font("Arial", size=11)
+
+            answer_text = st.session_state.messages[-1]["content"]
+            for line in textwrap.wrap(answer_text, 100):
+                pdf.cell(0, 8, line, ln=True)
+
+            pdf_bytes = BytesIO()
+            pdf.output(pdf_bytes)
+            st.download_button(
+                "Download PDF",
+                data=pdf_bytes.getvalue(),
+                file_name="analysis.pdf",
+                mime="application/pdf",
+            )
         else:
-            st.session_state["last_answer"] = m.content
-            st.write(m.content)
-
-    # ── PDF export of last answer ────────────────────────────────────
-    if st.button("Generate PDF of last answer") and st.session_state.get("last_answer"):
-        pdf = FPDF()
-        pdf.set_auto_page_break(auto=True, margin=15)
-        pdf.add_page()
-        pdf.set_font("Helvetica", size=11)
-        for line in st.session_state["last_answer"].splitlines():
-            pdf.multi_cell(0, 5, txt=line)
-        fname = "answer.pdf"
-        pdf.output(fname)
-        with open(fname, "rb") as f:
-            st.download_button("Download PDF", f, file_name=fname, mime="application/pdf")
+            st.warning("Ask a question first to have something to export!")
