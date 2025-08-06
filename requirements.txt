@@ -1,9 +1,5 @@
-streamlit>=1.35
-pandas>=2.2
-plotly>=5.22
-openai>=1.30
-ydata-profiling>=4.7          # ProfileReport
-python-dotenv>=1.0            # local secrets
-openpyxl>=3.1
-fpdf2>=2.7                    # tiny, pure-py PDF generator
-tabulate>=0.9
+streamlit>=1.35,<2.0
+pandas>=2.2,<2.3
+plotly>=5.22,<6.0
+openai>=1.30,<2.0
+fpdf2>=2.7,<3.0
