@@ -196,7 +196,8 @@ def render_chart(spec: Dict[str, str]):
 
 # ── Main page ───────────────────────────────────────────────────────────
 
-if df := st.session_state.get("df"):
+df = st.session_state.get("df")
+if df is not None:
     # Data loaded – full UI follows
 
     show_kpis(df)
