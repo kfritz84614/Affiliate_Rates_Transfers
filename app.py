@@ -197,6 +197,8 @@ def render_chart(spec: Dict[str, str]):
 # ── Main page ───────────────────────────────────────────────────────────
 
 if df := st.session_state.get("df"):
+    # Data loaded – full UI follows
+
     show_kpis(df)
 
     # First‑load chart suggestions
@@ -253,3 +255,8 @@ if df := st.session_state.get("df"):
             st.download_button("Download PDF", buf.getvalue(), "analysis.pdf", "application/pdf")
         else:
             st.warning("Run a query first so there’s something to export!")
+else:
+    # No data yet – friendly landing message
+    st.markdown("### 📂 No data loaded")
+    st.markdown("Upload a CSV using the sidebar on the left to get started.")
+    st.markdown("The app will clean your data automatically, suggest charts, and let you ask questions in natural language.")
