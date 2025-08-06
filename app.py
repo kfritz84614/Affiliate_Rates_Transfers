@@ -75,17 +75,28 @@ def load_csv(file) -> pd.DataFrame:
 # ── LLM helper functions exposed to GPT ──────────────────────────────────
 
 def aggregate(by: str, target: str | None = None, metric: str = "sum", top_n: int | None = None) -> pd.DataFrame:
-    """Grouped stats: sum | mean | count."""
+    """Grouped stats with robust validation."""
     df = st.session_state.df
+
+    # column existence checks
+    if by not in df.columns:
+        st.warning(f"Column '{by}' does not exist in data – available: {list(df.columns)[:10]}…")
+        return pd.DataFrame()
+    if target and target not in df.columns:
+        st.warning(f"Target column '{target}' does not exist – using first numeric col instead.")
+        num_cols = df.select_dtypes("number").columns
+        target = num_cols[0] if not num_cols.empty else by
+
     if target is None:
         target = df.columns[0]
-    agg_map = {"sum": "sum", "mean": "mean", "count": "count"}
-    if metric not in agg_map:
-        metric = "sum"
+
     if metric == "count":
         ser = df.groupby(by)[target].count()
+    elif metric == "mean":
+        ser = df.groupby(by)[target].mean()
     else:
-        ser = df.groupby(by)[target].agg(metric)
+        ser = df.groupby(by)[target].sum()
+
     out = ser.reset_index().rename(columns={target: metric})
     if top_n:
         out = out.nlargest(top_n, metric)
@@ -180,19 +191,30 @@ def render_chart(spec: Dict[str, str]):
     ct = spec.get("type", "bar")
     x, y, agg = spec.get("x"), spec.get("y"), spec.get("agg", "sum")
     df = st.session_state.df
-    if not (x and y):
+
+    # validate columns
+    if not x or not y:
         st.warning("Chart spec missing x or y – skipped")
         return
-    if agg == "count":
-        df_plot = df.groupby(x)[y].count().reset_index(name="count"); y = "count"
-    else:
-        df_plot = df.groupby(x)[y].agg(agg).reset_index()
+    if x not in df.columns or y not in df.columns:
+        st.warning(f"Chart uses unknown column(s) '{x}', '{y}' – skipped")
+        return
+
+    try:
+        if agg == "count":
+            df_plot = df.groupby(x)[y].count().reset_index(name="count"); y = "count"
+        else:
+            df_plot = df.groupby(x)[y].agg(agg).reset_index()
+    except Exception as e:
+        st.warning(f"Chart aggregation failed: {e}")
+        return
+
     fig = {
         "line": px.line,
         "scatter": px.scatter,
         "heatmap": lambda _df, **kw: px.density_heatmap(df, x=x, y=y),
     }.get(ct, px.bar)(df_plot, x=x, y=y)
-    st.plotly_chart(fig, use_container_width=True)
+    st.plotly_chart(fig, use_container_width=True)(fig, use_container_width=True)
 
 # ── Main page ───────────────────────────────────────────────────────────
 
@@ -202,14 +224,22 @@ if df is not None:
 
     show_kpis(df)
 
-    # First‑load chart suggestions
+        # First‑load chart suggestions
     if "_charts_rendered" not in st.session_state:
-        prompt = "Provide up to 5 useful chart specs (JSON list) for this dataset."
-        resp = call_llm([{"role": "user", "content": prompt}])
+        prompt = "Provide up to 5 useful chart specs (JSON list) for this dataset. Each spec should have keys: type, x, y, agg."
         try:
-            st.session_state._chart_specs = json.loads(resp.choices[0].message.content)[:5]
+            resp = call_llm([{"role": "user", "content": prompt}])
+            charts = json.loads(resp.choices[0].message.content)
         except Exception:
-            st.session_state._chart_specs = []
+            charts = []
+
+        # fallback simple charts if LLM fails
+        if not charts:
+            cat_cols = df.select_dtypes("object").columns
+            num_cols = df.select_dtypes("number").columns
+            if not cat_cols.empty and not num_cols.empty:
+                charts = [{"type": "bar", "x": cat_cols[0], "y": num_cols[0], "agg": "sum"}]
+        st.session_state._chart_specs = charts[:5]
         st.session_state._charts_rendered = True
 
     for s in st.session_state.get("_chart_specs", []):
