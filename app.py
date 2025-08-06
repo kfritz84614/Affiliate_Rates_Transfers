@@ -63,49 +63,119 @@ def get_rows(df: pd.DataFrame, where: str, columns: list[str] | None = None, lim
         view = view[columns]
     return view.head(limit)
 
-# ────────────────────────  Auto‑insight visualisations  ──────────────── #
+# ────────────────────────  LLM‑driven chart suggestions  ─────────────── #
 
-def show_auto_insights(df: pd.DataFrame):
-    """Render quick charts that spark strategic thinking."""
-    with st.expander("🔍 Auto Insights & Charts", expanded=True):
-        num_cols = df.select_dtypes("number").columns.tolist()
-        if len(num_cols) > 1:
-            corr = df[num_cols].corr()
-            fig = px.imshow(
-                corr,
-                text_auto=".2f",
-                title="Correlation heat‑map (numeric columns)",
-                height=450,
+@st.cache_data(show_spinner=False)
+def suggest_charts(df: pd.DataFrame):
+    """Ask the LLM to suggest up to 3 helpful chart specs."""
+    summary = {
+        "columns": df.dtypes.astype(str).to_dict(),
+        "n_rows": len(df),
+        "numeric_summary": df.describe(include="number").round(2).to_dict(),
+    }
+
+    functions = [
+        {
+            "name": "chart_suggestions",
+            "description": "Return up to 3 chart specifications helpful for business decisions.",
+            "parameters": {
+                "type": "object",
+                "properties": {
+                    "charts": {
+                        "type": "array",
+                        "items": {
+                            "type": "object",
+                            "properties": {
+                                "type": {
+                                    "type": "string",
+                                    "enum": ["bar", "line", "scatter", "heatmap"],
+                                },
+                                "x": {"type": "string"},
+                                "y": {"type": "string"},
+                                "metric": {
+                                    "type": "string",
+                                    "enum": ["sum", "mean", "count", "none"],
+                                    "default": "none",
+                                },
+                                "title": {"type": "string"},
+                            },
+                            "required": ["type", "x", "y"],
+                        },
+                        "minItems": 1,
+                        "maxItems": 3,
+                    }
+                },
+                "required": ["charts"],
+            },
+        }
+    ]
+
+    system = (
+        "You are an analytics expert. Based on the dataframe summary provided, "
+        "suggest up to three charts that would give strategic business insight. "
+        "Use simple column names; if aggregation needed, specify metric (sum / mean / count)."
+    )
+
+    msgs = [
+        {"role": "system", "content": system},
+        {"role": "user", "content": json.dumps(summary)},
+    ]
+
+    resp = chat_with_retry(
+        model=OPENAI_MODEL,
+        messages=msgs,
+        functions=functions,
+        function_call={"name": "chart_suggestions"},
+        temperature=0.2,
+    )
+
+    charts = json.loads(resp.choices[0].message.function_call.arguments)["charts"]
+    return charts
+
+
+def render_chart(df: pd.DataFrame, spec: dict):
+    """Render a Plotly chart based on the spec."""
+    chart_type = spec["type"]
+    x = spec["x"]
+    y = spec["y"]
+    metric = spec.get("metric", "none")
+    title = spec.get("title", f"{chart_type.title()} of {y} by {x}")
+
+    if chart_type == "bar":
+        if metric != "none":
+            data = (
+                df.groupby(x)[y]
+                .agg(metric)
+                .reset_index()
+                .rename({y: "value"}, axis=1)
             )
-            st.plotly_chart(fig, use_container_width=True)
-
-        # Pick first numeric for category bars
-        if num_cols:
-            target = num_cols[0]
-            cat_cols = [c for c in df.columns if df[c].dtype == "object" and df[c].nunique() <= 20]
-            for c in cat_cols[:3]:  # limit to three charts
-                agg = (
-                    df.groupby(c)[target]
-                    .sum()
-                    .sort_values(ascending=False)
-                    .reset_index()
-                    .rename({target: "Total"}, axis=1)
-                )
-                fig = px.bar(
-                    agg,
-                    x=c,
-                    y="Total",
-                    title=f"Total {target} by {c}",
-                    text_auto=".2s",
-                    height=400,
-                )
-                st.plotly_chart(fig, use_container_width=True)
+            fig = px.bar(data, x=x, y="value", title=title, text_auto=".2s")
+        else:
+            fig = px.bar(df, x=x, y=y, title=title, text_auto=".2s")
+    elif chart_type == "line":
+        if metric != "none":
+            data = (
+                df.groupby(x)[y]
+                .agg(metric)
+                .reset_index()
+                .rename({y: "value"}, axis=1)
+            )
+            fig = px.line(data, x=x, y="value", title=title)
+        else:
+            fig = px.line(df, x=x, y=y, title=title)
+    elif chart_type == "scatter":
+        fig = px.scatter(df, x=x, y=y, title=title)
+    elif chart_type == "heatmap":
+        fig = px.density_heatmap(df, x=x, y=y, title=title)
+    else:
+        return
+    st.plotly_chart(fig, use_container_width=True)
 
 # ─────────────────────────────  Streamlit UI  ────────────────────────── #
 
 st.set_page_config(page_title="CSV Insight", layout="wide")
 
-st.title("📊 CSV Insight v8·4")
+st.title("📊 CSV Insight v9·0 – LLM‑guided Charts")
 
 uploaded = st.file_uploader("Drop a CSV", type=["csv"])
 if uploaded:
@@ -113,8 +183,11 @@ if uploaded:
     if st.session_state.get("file_sha") != file_sha:
         st.session_state["df"] = load_dataframe(uploaded)
         st.session_state["file_sha"] = file_sha
+        # get new suggestions whenever a fresh file appears
+        st.session_state["chart_specs"] = suggest_charts(st.session_state["df"])
 
     df = st.session_state["df"]
+    chart_specs = st.session_state.get("chart_specs", [])
 
     # ── Headline KPIs ────────────────────────────────────────────────
     col1, col2, col3, col4 = st.columns(4)
@@ -127,8 +200,11 @@ if uploaded:
         share = (overruns.gt(0).mean().mean() * 100) if not overruns.empty else 0
         col4.metric("Over‑run share", f"{share:.1f}%")
 
-    # ── Automated insight charts ─────────────────────────────────────
-    show_auto_insights(df)
+    # ── LLM‑suggested charts ────────────────────────────────────────
+    if chart_specs:
+        with st.expander("📈 Suggested Insightful Charts", expanded=True):
+            for spec in chart_specs:
+                render_chart(df, spec)
 
     # ── Chat input section ──────────────────────────────────────────
     prompt = st.chat_input("Ask anything about your data…")
