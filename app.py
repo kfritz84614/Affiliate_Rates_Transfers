@@ -14,7 +14,6 @@ def chat_with_retry(**kwargs):
         try:
             return openai.chat.completions.create(**kwargs)
         except Exception as e:
-            # Only retry rate‑limits; bubble anything else.
             if getattr(e, "status", None) != 429:
                 raise
             wait = 2 ** attempt + random.random()
@@ -22,16 +21,18 @@ def chat_with_retry(**kwargs):
             time.sleep(wait)
     raise RuntimeError("OpenAI retries exhausted")
 
-# ─────────────────────────────  Data utils  ─────────────────────────── #
+# ───────────────────────────  Data utilities  ───────────────────────── #
 
 @st.cache_data(show_spinner=False)
 def to_number(s: pd.Series) -> pd.Series:
     """Convert strings like "$1,234" or "(123)" to floats."""
-    return (s.astype(str)
-              .str.replace(r"[^0-9.\-()]", "", regex=True)
-              .str.replace(r"\((.*)\)", r"-\1", regex=True)
-              .astype(float)
-              .round(2))
+    return (
+        s.astype(str)
+        .str.replace(r"[^0-9.\-()]", "", regex=True)
+        .str.replace(r"\((.*)\)", r"-\1", regex=True)
+        .astype(float)
+        .round(2)
+    )
 
 @st.cache_data(show_spinner=False)
 def load_dataframe(file) -> pd.DataFrame:
@@ -40,17 +41,17 @@ def load_dataframe(file) -> pd.DataFrame:
         try:
             df[col] = to_number(df[col])
         except Exception:
-            # Ignore columns that can't be coerced
-            pass
+            pass  # non‑numeric text
     return df
 
 @st.cache_data(show_spinner=False)
 def aggregate(df: pd.DataFrame, by: str, target: str, metric: str = "mean", top_n: int | None = None):
-    """Return aggregated metric sorted desc (optionally top‑n)."""
     agg_map = {"mean": "mean", "median": "median", "sum": "sum"}
-    res = (df.groupby(by)[target]
-             .agg(agg_map.get(metric, "mean"))
-             .sort_values(ascending=False))
+    res = (
+        df.groupby(by)[target]
+        .agg(agg_map.get(metric, "mean"))
+        .sort_values(ascending=False)
+    )
     if top_n:
         res = res.head(int(top_n))
     return res.reset_index(names=[by]).rename({target: "Result"}, axis=1)
@@ -62,11 +63,49 @@ def get_rows(df: pd.DataFrame, where: str, columns: list[str] | None = None, lim
         view = view[columns]
     return view.head(limit)
 
-# ─────────────────────────────  Streamlit UI  ─────────────────────────── #
+# ────────────────────────  Auto‑insight visualisations  ──────────────── #
+
+def show_auto_insights(df: pd.DataFrame):
+    """Render quick charts that spark strategic thinking."""
+    with st.expander("🔍 Auto Insights & Charts", expanded=True):
+        num_cols = df.select_dtypes("number").columns.tolist()
+        if len(num_cols) > 1:
+            corr = df[num_cols].corr()
+            fig = px.imshow(
+                corr,
+                text_auto=".2f",
+                title="Correlation heat‑map (numeric columns)",
+                height=450,
+            )
+            st.plotly_chart(fig, use_container_width=True)
+
+        # Pick first numeric for category bars
+        if num_cols:
+            target = num_cols[0]
+            cat_cols = [c for c in df.columns if df[c].dtype == "object" and df[c].nunique() <= 20]
+            for c in cat_cols[:3]:  # limit to three charts
+                agg = (
+                    df.groupby(c)[target]
+                    .sum()
+                    .sort_values(ascending=False)
+                    .reset_index()
+                    .rename({target: "Total"}, axis=1)
+                )
+                fig = px.bar(
+                    agg,
+                    x=c,
+                    y="Total",
+                    title=f"Total {target} by {c}",
+                    text_auto=".2s",
+                    height=400,
+                )
+                st.plotly_chart(fig, use_container_width=True)
+
+# ─────────────────────────────  Streamlit UI  ────────────────────────── #
 
 st.set_page_config(page_title="CSV Insight", layout="wide")
 
-st.title("📊 CSV Insight v8·3")
+st.title("📊 CSV Insight v8·4")
 
 uploaded = st.file_uploader("Drop a CSV", type=["csv"])
 if uploaded:
@@ -86,10 +125,13 @@ if uploaded:
         col3.metric("Mean", f"{df[numeric_cols].mean().mean():,.2f}")
         overruns = df.filter(regex="over.?run", axis=1)
         share = (overruns.gt(0).mean().mean() * 100) if not overruns.empty else 0
-        col4.metric("Over‑run share", f"{share:.1f}%")
+        col4.metric("Over‑run share", f"{share:.1f}%")
 
-    # ── Chat input ──────────────────────────────────────────────────
-    prompt = st.chat_input("Ask anything about your data")
+    # ── Automated insight charts ─────────────────────────────────────
+    show_auto_insights(df)
+
+    # ── Chat input section ──────────────────────────────────────────
+    prompt = st.chat_input("Ask anything about your data…")
     if prompt:
         system = (
             "You are a data analyst. Available functions allow grouping or row‑level retrieval. "
@@ -148,7 +190,6 @@ if uploaded:
                 result_df = aggregate(df, **args)
                 st.session_state["last_answer"] = result_df.to_string()
                 st.dataframe(result_df)
-                # Plotly bar chart
                 if not result_df.empty:
                     fig = px.bar(
                         result_df,
