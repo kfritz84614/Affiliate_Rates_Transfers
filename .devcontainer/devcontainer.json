@@ -1,22 +1,34 @@
 {
-  // -----------------------------------------------------------
-  //  VS Code Dev Container for the CSV Insight Assistant project
-  //  • Python 3.11 image
-  //  • Installs requirements on first open
-  //  • Auto‑runs Streamlit on port 8501
-  // -----------------------------------------------------------
-  "name": "csv-insight-assistant",
+  "name": "CSV-Explorer-AI",
+  // Base image with Python 3.11 (matches runtime.txt & Streamlit Cloud)
   "image": "mcr.microsoft.com/devcontainers/python:3.11",
 
-  // Install Python deps every time the container’s contents refresh
-  "updateContentCommand": "pip install -r requirements.txt && echo '✅ requirements installed'",
+  // Optional features (add more if you need them)
+  "features": {
+    "ghcr.io/devcontainers/features/git:1": {},
+    "ghcr.io/devcontainers/features/gh-cli:1": {}
+  },
 
-  // Start the app as soon as you attach
-  "postAttachCommand": "streamlit run app.py --server.port 8501 --server.enableCORS false --server.enableXsrfProtection false",
+  // Run *once* after the container is created
+  "postCreateCommand": "pip install --upgrade pip && pip install -r requirements.txt",
 
-  // Expose Streamlit to your host browser
-  "forwardPorts": [8501],
+  // Mount workspace read-only to avoid accidental writes from the container
+  "mounts": [
+    "source=${localWorkspaceFolder},target=/workspace,type=bind,consistency=cached,readonly"
+  ],
 
-  // Use the default VS Code user (keeps permissions simple)
-  "remoteUser": "vscode"
+  // VS Code settings & recommended extensions
+  "customizations": {
+    "vscode": {
+      "settings": {
+        "python.defaultInterpreterPath": "/usr/local/bin/python",
+        "terminal.integrated.defaultProfile.linux": "bash"
+      },
+      "extensions": [
+        "ms-python.python",
+        "ms-python.vscode-pylance",
+        "ms-toolsai.jupyter"
+      ]
+    }
+  }
 }
