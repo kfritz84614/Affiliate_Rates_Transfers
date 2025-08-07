@@ -1,33 +1,20 @@
 {
-  "name": "CSV-Explorer-AI",
-  // Base image with Python 3.11 (matches runtime.txt & Streamlit Cloud)
+  "name": "csv-analyst",
   "image": "mcr.microsoft.com/devcontainers/python:3.11",
-
-  // Optional features (add more if you need them)
   "features": {
-    "ghcr.io/devcontainers/features/git:1": {},
-    "ghcr.io/devcontainers/features/gh-cli:1": {}
+    "ghcr.io/devcontainers/features/common-utils:2": {},
+    "ghcr.io/devcontainers/features/node:1": {
+      "version": "lts"
+    }
   },
-
-  // Run *once* after the container is created
-  "postCreateCommand": "pip install --upgrade pip && pip install -r requirements.txt",
-
-  // Mount workspace read-only to avoid accidental writes from the container
-  "mounts": [
-    "source=${localWorkspaceFolder},target=/workspace,type=bind,consistency=cached,readonly"
-  ],
-
-  // VS Code settings & recommended extensions
+  "postCreateCommand": "pip install -r requirements.txt",
   "customizations": {
     "vscode": {
-      "settings": {
-        "python.defaultInterpreterPath": "/usr/local/bin/python",
-        "terminal.integrated.defaultProfile.linux": "bash"
-      },
       "extensions": [
         "ms-python.python",
         "ms-python.vscode-pylance",
-        "ms-toolsai.jupyter"
+        "ms-toolsai.jupyter",
+        "streetsidesoftware.code-spell-checker"
       ]
     }
   }
