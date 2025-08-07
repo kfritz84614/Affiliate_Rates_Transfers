@@ -1,18 +1,8 @@
-"""
-Streamlit CSV Explorer – v9.1 (2025‑08‑06)
-------------------------------------------------
-• Case‑insensitive column matching ("vehicle" == "Vehicle")
-• Graceful fallback when LLM suggests unknown columns
-• Fixed duplicate `st.plotly_chart` call
-"""
-
-from __future__ import annotations
-
+```python
 import os
 import io
 import json
 import re
-import math
 from typing import List, Dict, Any, Optional, Tuple
 
 import pandas as pd
@@ -88,11 +78,12 @@ def clean_dataframe(raw: pd.DataFrame) -> pd.DataFrame:
                 or sample.str.contains(r"\d{1,2}/\d{1,2}/\d{2,4}").any()
                 or sample.str.contains("am").any()
                 or sample.str.contains("pm").any()
-                or sample.str.contains("t\d{2}:\d{2}").any()
+                or sample.str.contains(r"t\d{2}:\d{2}").any()
             )
             if has_date_hint:
                 try:
-                    df[col] = pd.to_datetime(df[col], errors="raise")
+                    # Use errors="coerce" to avoid noisy warnings; non-dates become NaT
+                    df[col] = pd.to_datetime(df[col], errors="coerce")
                 except Exception:
                     pass  # keep as is if it fails
 
@@ -104,7 +95,7 @@ def clean_dataframe(raw: pd.DataFrame) -> pd.DataFrame:
             if s.empty:
                 continue
             sample = s.sample(min(len(s), 200), random_state=0)
-            looks_numeric = sample.str.contains(r"^[\s\($-]?[\d,]+(\.[\d]+)?[%\s\)]?$").mean() > 0.6
+            looks_numeric = sample.str.contains(r"^[\s\($-]?[\d,]+(?:\.[\d]+)?[%\s\)]?$", regex=True).mean() > 0.6
             if looks_numeric:
                 df[col] = df[col].map(_to_number)
 
@@ -216,7 +207,7 @@ def llm_suggest_charts(summary: Dict[str, Any], user_request: Optional[str] = No
     prompt = {
         "role": "user",
         "content": (
-            "DATASET SUMMARY\n" + json.dumps(summary) +
+            "DATASET SUMMARY\n" + json.dumps(summary, default=str) +
             ("\nUSER REQUEST:\n" + user_request if user_request else "") +
             f"\nReturn JSON array of up to {n} chart specs."
         )
@@ -306,21 +297,27 @@ def render_chart(df: pd.DataFrame, spec: Dict[str, Any]):
         ycols = y if isinstance(y, list) else [y]
         cols = [c for c in ycols if c in d.columns and pd.api.types.is_numeric_dtype(d[c])]
         if not cols:
-            return d[[x] + ([color] if color else [])].assign(_ones=1)
+            # No numeric y -> show counts by x (optionally split by color)
+            if x not in d.columns:
+                return d
+            group_cols = [x] + ([color] if color else [])
+            out = d.groupby(group_cols, dropna=False).size().reset_index(name="count")
+            out.rename(columns={"count": "value"}, inplace=True)
+            return out
         if x not in d.columns:
             return d
         group_cols = [x] + ([color] if color else [])
         grouped = d.groupby(group_cols, dropna=False)[cols]
         if agg == "sum":
-            out = grouped.sum().reset_index()
+            out = grouped.sum(numeric_only=True).reset_index()
         elif agg == "mean":
-            out = grouped.mean().reset_index()
+            out = grouped.mean(numeric_only=True).reset_index()
         elif agg == "median":
-            out = grouped.median().reset_index()
+            out = grouped.median(numeric_only=True).reset_index()
         elif agg == "count":
             out = grouped.count().reset_index()
         else:
-            out = grouped.sum().reset_index()
+            out = grouped.sum(numeric_only=True).reset_index()
         return out
 
     dfx = agg_df(dff)
@@ -369,7 +366,7 @@ def maybe_affiliate_est_vs_actual(df: pd.DataFrame):
         return False
 
     dfx = df[[affiliate, est, act]].copy()
-    grp = dfx.groupby(affiliate, dropna=False)[[est, act]].sum().reset_index()
+    grp = dfx.groupby(affiliate, dropna=False)[[est, act]].sum(numeric_only=True).reset_index()
     melted = grp.melt(id_vars=affiliate, value_vars=[act, est], var_name="Kind", value_name="Amount")
 
     fig = px.bar(
@@ -429,8 +426,8 @@ def llm_section(df: pd.DataFrame, summary: Dict[str, Any]):
             messages = [
                 {"role": "system", "content": "You are a senior data analyst. Be precise and concise."},
                 {"role": "user", "content": (
-                    "DATASET SUMMARY\n" + json.dumps(summary) +
-                    ("\nFULL DATA JSONL\n" + "\n".join(json.dumps(r) for r in df.to_dict(orient="records")) if allow_full else "") +
+                    "DATASET SUMMARY\n" + json.dumps(summary, default=str) +
+                    ("\nFULL DATA JSONL\n" + "\n".join(json.dumps(r, default=str) for r in df.to_dict(orient="records")) if allow_full else "") +
                     "\nQUESTION:\n" + user_q
                 )}
             ]
@@ -515,3 +512,4 @@ def main():
 
 if __name__ == "__main__":
     main()
+```
